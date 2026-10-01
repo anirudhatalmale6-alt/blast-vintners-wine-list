@@ -45,8 +45,13 @@ final class BVWL_Wine_List {
 
 		// --- spreadsheet import -> WooCommerce products -----------------
 		add_action( 'admin_footer', array( $this, 'print_import_checkbox' ) );
-		add_action( 'tablepress_event_imported_table', array( $this, 'after_tablepress_import' ), 10, 1 );
-		add_action( 'save_post_tablepress_table', array( $this, 'maybe_sync_products_on_save' ), 20, 3 );
+
+		// TablePress's own events. Both hand us the table ID, and both fire
+		// *after* the table ID -> post ID map has been written, which matters:
+		// hooking save_post instead runs too early, when that map does not yet
+		// know about the new table and the lookup comes back empty.
+		add_action( 'tablepress_event_added_table', array( $this, 'on_table_written' ), 10, 1 );
+		add_action( 'tablepress_event_saved_table', array( $this, 'on_table_written' ), 10, 1 );
 	}
 
 	/* =====================================================================
@@ -509,47 +514,70 @@ final class BVWL_Wine_List {
 	 * ===================================================================== */
 
 	public function print_import_checkbox() {
-		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
-		if ( ! $screen || false === strpos( (string) $screen->id, 'tablepress_import' ) ) {
+		if ( ! $this->is_tablepress_import_screen() ) {
 			return;
 		}
 		?>
 		<script>
 		jQuery(function($){
-			var $row = $('#row-import-existing-table').last();
-			if ( ! $row.length || $('#bvwl-woo-product').length ) { return; }
-			$row.after(
-				'<tr class="bottom-border" id="bvwl-woo-row">' +
+			var row =
+				'<tr class="top-border" id="bvwl-woo-row">' +
 				'<th class="column-1" scope="row"><label for="bvwl-woo-product">Add Woocommerce Product:</label></th>' +
-				'<td class="column-2"><input type="checkbox" id="bvwl-woo-product" name="import[woo_product]" value="1"/></td>' +
-				'</tr>'
-			);
+				'<td class="column-2"><input type="checkbox" id="bvwl-woo-product" name="import[woo_product]" value="1"/>' +
+				'<p class="description" style="margin:4px 0 0">Create a WooCommerce product for every row, and wire the Buy column to them.</p>' +
+				'</td></tr>';
+
+			function inject() {
+				if ( $('#bvwl-woo-product').length ) { return true; }
+
+				// TablePress 1.x: a row with this id sat on the import screen.
+				var $legacy = $('#row-import-existing-table').last();
+				if ( $legacy.length ) { $legacy.after(row); return true; }
+
+				// TablePress 3.x rebuilt this screen and renders it with JavaScript
+				// after DOM ready, so the rows do not exist yet when we first run.
+				// Anchor above the Import button, the one row certain to be there.
+				var $form = $('#tablepress-page-form');
+				if ( ! $form.length ) { return false; }
+				var $submitRow = $form.find('tbody tr').filter(function(){
+					return $(this).find('button[type=submit], input[type=submit]').length > 0;
+				}).last();
+				if ( $submitRow.length ) { $submitRow.before(row); return true; }
+				return false;
+			}
+
+			if ( inject() ) { return; }
+
+			// Keep looking while the screen builds itself, then give up quietly.
+			var tries = 0;
+			var timer = setInterval(function(){
+				tries++;
+				if ( inject() || tries > 60 ) { clearInterval(timer); }
+			}, 250);
 		});
 		</script>
 		<?php
 	}
 
-	/** TablePress 2.x fires this; harmless on 1.4 where it simply never runs. */
-	public function after_tablepress_import( $table_id ) {
+	/** True on the TablePress "Import a Table" screen, on 1.x and 3.x alike. */
+	private function is_tablepress_import_screen() {
+		if ( isset( $_GET['page'] ) && 'tablepress_import' === $_GET['page'] ) {
+			return true;
+		}
+		$screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+		return $screen && false !== strpos( (string) $screen->id, 'tablepress_import' );
+	}
+
+	/**
+	 * A table has just been added or saved. Only do anything if this request was
+	 * an import with the "Add Woocommerce Product" box ticked — editing a table
+	 * by hand must never silently create a new set of products.
+	 */
+	public function on_table_written( $table_id ) {
 		if ( empty( $_POST['import']['woo_product'] ) ) {
 			return;
 		}
 		$this->sync_products_for_table( (string) $table_id );
-	}
-
-	/** TablePress 1.4 route: the table is stored as a post, so catch its save. */
-	public function maybe_sync_products_on_save( $post_id, $post, $update ) {
-		if ( empty( $_POST['import']['woo_product'] ) ) {
-			return;
-		}
-		if ( wp_is_post_revision( $post_id ) || wp_is_post_autosave( $post_id ) ) {
-			return;
-		}
-		$table_id = $this->post_id_to_table_id( $post_id );
-		if ( '' === $table_id ) {
-			return;
-		}
-		$this->sync_products_for_table( $table_id );
 	}
 
 	/**

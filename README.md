@@ -61,6 +61,33 @@ The refactor was checked against the unmodified site rather than assumed:
   **£31.00**, matching that row's "Inc Duty & Vat" column
 - every file lints clean under PHP 8.3, which is the version this site is moving to
 
+
+## TablePress 3.x compatibility
+
+Verified against TablePress **3.4** as well as the 1.4 the site ran for a decade.
+Two things changed in between and are handled here:
+
+- **The import screen is now rendered by JavaScript after page load**, and has no
+  row IDs to hang off. The "Add Woocommerce Product" tickbox is therefore
+  anchored to the form and inserted immediately above the Import button, retrying
+  while the screen builds itself.
+- **`save_post` fires too early.** TablePress writes the table post *before* it
+  records the table-ID-to-post-ID mapping, so a lookup during `save_post` finds
+  nothing. This plugin uses `tablepress_event_added_table` and
+  `tablepress_event_saved_table` instead, both of which fire after the mapping
+  exists.
+
+End-to-end import test on TablePress 3.4, WooCommerce 11.1.2, PHP 8.3:
+
+| row | spreadsheet says | product created | quantity box offered |
+|---|---|---|---|
+| 1 | 6 bottles, unit 1, £58 | stock 6, price 58, cat "Burgundy Red" | 1,2,3,4,5,6 |
+| 2 | 12 bottles, unit 2, £28 | stock 12, price 28, cat "Loire White" | 2,4,6,8,10,12 |
+| 3 | 3 bottles, unit 1, £47 | stock 3, price 47, cat "Rhone Red" | 1,2,3 |
+
+Note rows 2's quantity box counting in twos, and that every product got a
+category — neither of which the original code managed (see `NOTES.md`).
+
 ## Known quirks, reproduced deliberately
 
 These are faithful to the original so that the page renders identically. They are
