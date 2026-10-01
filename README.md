@@ -88,6 +88,32 @@ End-to-end import test on TablePress 3.4, WooCommerce 11.1.2, PHP 8.3:
 Note rows 2's quantity box counting in twos, and that every product got a
 category — neither of which the original code managed (see `NOTES.md`).
 
+
+## Removed: the iframe-embed support (1 Oct 2026)
+
+The theme used to hide the menu and logo whenever the site was displayed inside
+another website's frame, with a Safari storage-access workaround behind a `?ifr`
+switch. That came across into this plugin verbatim, and has now been removed.
+
+Three things had to be true before taking it out, and all three were checked:
+
+1. **The arrangement it existed for is retired.** The site used to be embedded in
+   a partner's page; the owner confirms that ended years ago.
+2. **Nothing passes `?ifr`.** No page, post or option on the site contains it.
+3. **Opayo does not frame anything.** The checkout plugin builds a form that
+   POSTs the whole browser to
+   `live.sagepay.com/gateway/service/vspform-register.vsp`, and the customer
+   returns to the site with a `?crypt=` response. It is the Opayo *Form*
+   protocol — a full redirect away and back, with no iframe at any point.
+
+Removing it is also a small win. The CSS hid `#menu-primary-menus` and
+`.x-brand img` on *every* page load and only restored them on `window.onload`,
+which waits for every image on the page. Measured on the live site, DOM content
+was ready at ~1.1s but `load` did not fire until ~1.65s, and the logo and
+navigation were `display: none` for that whole gap. Checked side by side
+afterwards: on staging both are visible as soon as the DOM is ready; on live
+they are still hidden at the same moment.
+
 ## Known quirks, reproduced deliberately
 
 These are faithful to the original so that the page renders identically. They are

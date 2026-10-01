@@ -40,7 +40,6 @@ final class BVWL_Wine_List {
 		add_action( 'wp_ajax_nopriv_my_custom_add_to_cart', array( $this, 'ajax_add_to_cart' ) );
 
 		// --- carried over from the X theme's functions.php --------------
-		add_action( 'wp_head', array( $this, 'print_iframe_embed_support' ) );
 		add_filter( 'woocommerce_cart_item_thumbnail', '__return_empty_string' );
 
 		// --- spreadsheet import -> WooCommerce products -----------------
@@ -391,75 +390,24 @@ final class BVWL_Wine_List {
 		<?php
 	}
 
-	/* =====================================================================
-	 * Carried over verbatim from the X theme's functions.php
-	 * ===================================================================== */
-
-	public function print_iframe_embed_support() {
-		?>
-	<style>
-		#menu-primary-menus,.x-brand img,.wp-block-image {display: none;}
-	</style>
-	<script>
-		window.onload = function()
-		{
-			if(window.location !== window.parent.location)
-			{
-				jQuery("#menu-primary-menus").hide();
-				jQuery(".x-brand img").hide();
-				jQuery(".wp-block-image").hide();
-			}
-			else
-			{
-				jQuery("#menu-primary-menus").show();
-				jQuery(".x-brand img").show();
-				jQuery(".wp-block-image").show();
-			}
-		};
-	</script>
-		<?php
-		if ( isset( $_REQUEST['ifr'] ) ) {
-			echo "<style>header0,.wp-block-image,.x-nav-collapse,.x-navbar-inner.x-container-fluid {display:none;} </style>";
-			?>
-	    <script>
-	    	function checkIfSafari()
-	    	{
-	    		if (navigator.userAgent.search("Safari") >= 0 && navigator.userAgent.search("Chrome") < 0)
-	    		{
-	    			return true;
-	    		}
-	    		return false;
-	    	}
-	    	function safariFix() {
-    if (1==1 || (navigator.userAgent.search("Safari") >= 0 && navigator.userAgent.search("Chrome") < 0)) {
-      document.requestStorageAccess().then(function success(hasAccess) {
-          console.log("Got cookie access for Safari workaround");
-          document.cookie = "foo=bar";
-        },  function rejected(error) { alert("Failed to set Cookies!");console.log('access denied');console.log(error); });
-      }
-  }
-	    	window.onload = function()
-	    	{
-	    		if(checkIfSafari())
-	    		{
-	    			var mask = jQuery("<div></div>");
-	    			jQuery(mask).css({"z-index":"9999","width":"100vw","height":"100vh","position":"fixed","top":"0px","left":"0px","background-color":"#ffffff"});
-	    			jQuery(mask).fadeTo(100,0.95);
-	    			var t = jQuery("<div onclick='safariFix()' style='padding:10px;text-transform:uppercase;cursor:pointer;background-color:#333;color:#eee;font-size:12px;'>Approve Use of Cookies</div>");
-	    			jQuery(t).css({"position":"absolute","left":"50%","top":"50%","transform":"translate(-50%,-50%)"});
-	    			jQuery(mask).append(t);
-	    			jQuery("body").append(mask);
-	    			jQuery(mask).on("click",function()
-	    			{
-	    				jQuery(mask).remove();
-	    			});
-	    		}
-	    		return;
-	    	}
-	    </script>
-			<?php
-		}
-	}
+	/*
+	 * Removed 2026-10-01: the iframe-embed support that used to live in the X
+	 * theme's functions.php.
+	 *
+	 * It hid the menu and logo whenever the site was displayed inside another
+	 * website's frame, and carried a Safari storage-access workaround behind a
+	 * "?ifr" switch. Joe confirmed the arrangement it was built for -- his site
+	 * embedded in a partner's page -- was retired years ago, nothing on the site
+	 * passes ?ifr, and the Opayo checkout is a full redirect to
+	 * live.sagepay.com/gateway/service/vspform-register.vsp rather than an
+	 * embedded frame, so no part of payment depended on it either.
+	 *
+	 * It was not free to keep: it hid #menu-primary-menus and .x-brand img in
+	 * CSS on every page load and only restored them on window.onload, which
+	 * waits for every image. Measured on the live site, that left the logo and
+	 * navigation invisible for roughly half a second after the page was
+	 * otherwise usable.
+	 */
 
 	/* =====================================================================
 	 * Add to cart (moved out of the X theme's functions.php)
