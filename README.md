@@ -5,6 +5,8 @@ A WordPress plugin holding the bespoke wine-list storefront for blastvintners.co
 Nothing here is new behaviour. This is the same code that has been running the
 wine list for years — it just used to live in the wrong place.
 
+Go-live procedure for the site this belongs to: [GO-LIVE.md](GO-LIVE.md).
+
 ## Why this plugin exists
 
 The wine list is not a TablePress setting and it is not custom CSS. It is custom
