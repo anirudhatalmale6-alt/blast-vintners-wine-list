@@ -21,7 +21,7 @@ sequence against the live site, with a rollback at every point.
 | Yoast SEO | 11.5 | **28.6** |
 | Security | WP Cerber 8.3 (delisted 2022) | **Wordfence 9.0.2** |
 | Wine list | inside TablePress + the theme | its own plugin |
-| Opayo gateway | AG 1.3.1 | whatever the licence entitles |
+| Opayo gateway | AG 1.3.1 | **2.2.5.1** (licence covers it) |
 
 ---
 
@@ -174,6 +174,29 @@ include it.
 - [ ] Add to basket still works
 
 Rollback is removing one line from `.htaccess`.
+
+---
+
+## 6a. Opayo gateway 1.3.1 → 2.2.5.1
+
+The licence covers this; the update is offered through the WordPress admin.
+
+> **Updating this plugin switches it off.** Rehearsed on staging: after the
+> upgrade completed successfully the plugin came back **deactivated**, and had to
+> be reactivated by hand. On live that means the card option vanishes from
+> checkout between the two actions. Do not walk away in between.
+
+- [ ] Keep a copy of `plugins/sage-pay-server-woocommerce-premium`
+- [ ] Update to 2.2.5.1
+- [ ] **Reactivate the plugin** — check, don't assume
+- [ ] Confirm `woocommerce_ag_sagepay_server_settings` still holds the vendor name and password (the gateway ID is unchanged in 2.2.5.1, so settings carry over; verified on staging)
+- [ ] Confirm "Credit / Debit Card Payment" is back at checkout
+
+2.2.5.1 is a much larger plugin than 1.3.1 and adds things the old one did not
+have: support for WooCommerce's block-based checkout, card tokenisation, and two
+further Opayo integrations (`ag_sagepay_redirect` and `ag_opayo_direct`) beside
+the Form one in use. Both arrive **disabled**; leave them that way unless Joe
+asks, so the payment route stays the one that is tested and working.
 
 ---
 
