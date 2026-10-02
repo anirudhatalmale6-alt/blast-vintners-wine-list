@@ -21,7 +21,7 @@ sequence against the live site, with a rollback at every point.
 | Yoast SEO | 11.5 | **28.6** |
 | Security | WP Cerber 8.3 (delisted 2022) | **Wordfence 9.0.2** |
 | Wine list | inside TablePress + the theme | its own plugin |
-| Opayo gateway | AG 1.3.1 | **2.2.5.1** (licence covers it) |
+| Opayo gateway | AG 1.3.1 | **4.3.6** (licence covers it) |
 
 ---
 
@@ -177,26 +177,41 @@ Rollback is removing one line from `.htaccess`.
 
 ---
 
-## 6a. Opayo gateway 1.3.1 → 2.2.5.1
+## 6a. Opayo gateway 1.3.1 → 4.3.6
 
-The licence covers this; the update is offered through the WordPress admin.
+**This step must come after both step 3 and step 6, and cannot be moved earlier.**
+4.3.6 declares `Requires PHP: 8.1` and `WC requires at least: 7.1.0`. Live is on
+PHP 7.4 and WooCommerce 3.6.7, so until those are done the site cannot run it.
 
-> **Updating this plugin switches it off.** Rehearsed on staging: after the
-> upgrade completed successfully the plugin came back **deactivated**, and had to
-> be reactivated by hand. On live that means the card option vanishes from
-> checkout between the two actions. Do not walk away in between.
+That constraint also explains something confusing: live's WordPress only ever
+offered an update to **2.2.5.1**, never 4.3.6. That is the licensing system
+correctly serving the newest version the site can actually run. Once PHP and
+WooCommerce are current, 4.3.6 becomes the right version — and it is the one
+Joe's account offers for download.
 
 - [ ] Keep a copy of `plugins/sage-pay-server-woocommerce-premium`
-- [ ] Update to 2.2.5.1
-- [ ] **Reactivate the plugin** — check, don't assume
-- [ ] Confirm `woocommerce_ag_sagepay_server_settings` still holds the vendor name and password (the gateway ID is unchanged in 2.2.5.1, so settings carry over; verified on staging)
-- [ ] Confirm "Credit / Debit Card Payment" is back at checkout
+- [ ] `unzip -tq` the zip **before** replacing anything
+- [ ] Replace the directory
+- [ ] **Check the plugin is still active.** Updating through WordPress's own
+      updater left it deactivated on the rehearsal; replacing the directory
+      directly did not. Either way, check rather than assume — while it is off,
+      checkout offers no card option at all.
+- [ ] Confirm `woocommerce_ag_sagepay_server_settings` still holds the vendor name and password
 
-2.2.5.1 is a much larger plugin than 1.3.1 and adds things the old one did not
-have: support for WooCommerce's block-based checkout, card tokenisation, and two
-further Opayo integrations (`ag_sagepay_redirect` and `ag_opayo_direct`) beside
-the Form one in use. Both arrive **disabled**; leave them that way unless Joe
-asks, so the payment route stays the one that is tested and working.
+The Form gateway keeps its ID — `inc/ag-woocommerce-sagepay-class.php` still
+declares `$this->id = "ag_sagepay_server"` — so the saved settings are found and
+the configured gateway carries over intact. Verified on staging: title,
+description and enabled state all survived.
+
+4.3.6 registers six gateways where 1.3.1 registered one: `ag_sagepay_server`
+(the Form integration in use), plus `ag_sagepay_redirect`, `ag_opayo_pi`,
+`ag_opayo_pi_redirect`, `ag_opayo_pi_dropin` and `ag_opayo_direct`. **All five
+new ones arrive disabled. Leave them disabled** — the tested, working payment
+route is the Form one, and switching routes is a separate decision with its own
+testing.
+
+It also adds block-checkout support, card tokenisation and fraud checks, none of
+which are in use. 202 PHP files, all clean under PHP 8.3.
 
 ---
 
