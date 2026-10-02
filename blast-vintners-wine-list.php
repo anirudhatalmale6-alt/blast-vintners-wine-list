@@ -386,6 +386,23 @@ final class BVWL_Wine_List {
     .tbpwoodesc{float: right; text-align: right;}
     .tablepress tbody td{cursor: pointer !important;}
     .column-3{width:50% !important; max-width: 50% !important;}
+
+    /* The X theme paints a red focus ring on anything focusable:
+         a:focus { outline: rgb(255,42,19) auto 5px }
+       That is correct and necessary for anyone navigating by keyboard, but a
+       mouse click also sets focus, so clicking a link flashed a red box for as
+       long as the page took to move. :focus-visible lets the browser tell the
+       two apart -- keyboard keeps the ring, mouse does not.
+       Added here rather than in the theme stylesheet so a theme update cannot
+       lose it, and because this install ignores the Customizer's Additional CSS. */
+    a:focus:not(:focus-visible),
+    .x-btn:focus:not(:focus-visible),
+    .button:focus:not(:focus-visible),
+    [type="submit"]:focus:not(:focus-visible),
+    select:focus:not(:focus-visible),
+    input[type="file"]:focus:not(:focus-visible),
+    input[type="radio"]:focus:not(:focus-visible),
+    input[type="checkbox"]:focus:not(:focus-visible) { outline: none; }
     </style>
 		<?php
 	}

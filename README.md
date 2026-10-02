@@ -116,6 +116,53 @@ navigation were `display: none` for that whole gap. Checked side by side
 afterwards: on staging both are visible as soon as the DOM is ready; on live
 they are still hidden at the same moment.
 
+
+## The red flash on click (2 Oct 2026)
+
+Reported as "a red thin outline block appears where you clicked, then
+disappears". Tracked down by driving real mouse and keyboard input rather than
+reading the stylesheet, because the stylesheet alone gave the wrong answer.
+
+The X theme paints a red focus ring on focusable things:
+
+```css
+a:focus, .x-btn:focus, [type=submit]:focus,
+select:focus, input[type=radio]:focus, input[type=checkbox]:focus
+  { outline: rgb(255,42,19) auto 5px; outline-offset: -1px; }
+```
+
+But a real mouse click on a **link** does not produce it — measured on the
+untouched live site, the computed outline after a genuine click is `none`. The
+rule only bites on controls the browser decides deserve a visible focus
+indicator. On the wine list that is two of them:
+
+| control | before | after |
+|---|---|---|
+| "Show Descriptions" checkbox | red ring on mouse click | **no ring** |
+| quantity dropdown | red ring on mouse click | red ring (deliberately left) |
+| links, the `+`, the add button | no ring | no ring |
+
+The fix is `:focus-visible`, which lets the browser distinguish keyboard
+navigation from a mouse click:
+
+```css
+a:focus:not(:focus-visible), …, input[type=checkbox]:focus:not(:focus-visible)
+  { outline: none; }
+```
+
+**The dropdown is left alone on purpose.** Chrome reports `:focus-visible` as
+true for a `<select>` even when it is clicked, because you operate one with the
+arrow keys once it has focus. Suppressing it would be a real accessibility loss
+for a cosmetic gain.
+
+Verified both halves, not just the requested one: after a mouse click the
+checkbox ring is gone; after pressing Tab the ring is still there
+(`:focus-visible = true`, `outline: rgb(255,42,19)`). Removing a focus indicator
+without checking keyboard users still have one would be the easy mistake here.
+
+Lives in this plugin rather than the theme stylesheet because a theme update
+would lose it, and because this install ignores the Customizer's Additional CSS.
+
 ## Known quirks, reproduced deliberately
 
 These are faithful to the original so that the page renders identically. They are
