@@ -163,6 +163,39 @@ without checking keyboard users still have one would be the easy mistake here.
 Lives in this plugin rather than the theme stylesheet because a theme update
 would lose it, and because this install ignores the Customizer's Additional CSS.
 
+
+## The header cart not updating (6 Oct 2026)
+
+Reported after go-live: adding a wine put it in the basket, but the cart in the
+top right still said "0 items", and clicking that cart went to the **home page**
+rather than the basket.
+
+Two symptoms, one cause. The header is WooCommerce Menu Cart, and while it
+thinks the basket is empty it deliberately links to the shop front with the
+title "Start shopping". So the wrong link was not a separate bug — it was the
+stale count showing its working.
+
+Why the count was stale:
+
+- the old code updated `.bc-mnc__cart-link--count-circle`, a selector belonging
+  to a different cart plugin that is not installed here. It matched **zero**
+  elements, so that line had never done anything
+- `wc_fragment_refresh` alone was not bringing the header back in step
+
+The fix is to make this endpoint behave like WooCommerce's own add-to-cart: the
+PHP returns `fragments` (markup keyed by CSS selector, built through
+`woocommerce_add_to_cart_fragments`) plus the `cart_hash`, and the JavaScript
+swaps those fragments in and then fires `added_to_cart` — the event the header
+cart listens for to come out of its empty state.
+
+Verified on the live site:
+
+| | before | after |
+|---|---|---|
+| header cart text | `0 ITEMS £0.00` | `1 ITEM £31.00` |
+| header cart link | `https://blastvintners.com` | `https://blastvintners.com/cart/` |
+| clicking it | landed on the home page | lands on the basket |
+
 ## Known quirks, reproduced deliberately
 
 These are faithful to the original so that the page renders identically. They are

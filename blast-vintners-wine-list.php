@@ -340,6 +340,25 @@ final class BVWL_Wine_List {
 		?>
     <script type="text/javascript">
 
+       /* Put the header cart back in step with the server. WooCommerce returns
+          "fragments" -- chunks of markup keyed by CSS selector -- and swapping
+          them in is exactly what its own add-to-cart button does. Firing
+          added_to_cart afterwards is the event the header cart plugin listens
+          for to come out of its "empty" state, which is also what fixes the
+          cart link pointing at the home page. */
+       function bvwlApplyCart(response) {
+         if ( response && response.fragments ) {
+           jQuery.each( response.fragments, function( key, value ) {
+             jQuery( key ).replaceWith( value );
+           });
+         }
+         jQuery( document.body ).trigger( 'wc_fragment_refresh' );
+         jQuery( document.body ).trigger( 'added_to_cart', [
+           response ? response.fragments : null,
+           response ? response.cart_hash : null
+         ]);
+       }
+
        function tbpwooaddToCart(p_id,r_idx) {
 
       var ajaxurl = '<?php echo $ajaxurl; ?>';
@@ -357,9 +376,7 @@ final class BVWL_Wine_List {
           if( response.success  ) {
              jQuery( "#tbp-woo-qty"+r_idx ).remove();
             jQuery('#tablepress-39-scroll-wrapper').prepend(response.message);
-            jQuery('.bc-mnc__cart-link--count-circle').text(response.qt);
-
-            jQuery( document.body ).trigger( 'wc_fragment_refresh' );
+            bvwlApplyCart(response);
             jQuery('html, body').animate({
           scrollTop: jQuery('#tablepress-39-scroll-wrapper').offset().top
          }, 2000);
@@ -368,9 +385,7 @@ final class BVWL_Wine_List {
           scrollTop: jQuery('#tablepress-39-scroll-wrapper').offset().top
          }, 2000);
             jQuery('#tablepress-39-scroll-wrapper').prepend(response.message);
-            jQuery('.bc-mnc__cart-link--count-circle').text(response.qt);
-
-            jQuery( document.body ).trigger( 'wc_fragment_refresh' );
+            bvwlApplyCart(response);
             jQuery( "#tbp-woo-qty"+r_idx ).remove();
           }
         }, 'json');
@@ -459,6 +474,24 @@ final class BVWL_Wine_List {
 				} else {
 					$retval['success'] = true;
 					$retval['message'] = '<div class="woocommerce-notices-wrapper"><div class="woocommerce-message" role="alert">Product successfully added to your cart.</div></div>';
+
+					// Hand back the same cart fragments WooCommerce's own add-to-cart
+					// returns. Without them the header cart keeps showing whatever
+					// count the page was built with, and because WooCommerce Menu
+					// Cart points an EMPTY cart at the shop front rather than the
+					// basket, clicking it takes you to the home page instead.
+					if ( function_exists( 'woocommerce_mini_cart' ) ) {
+						ob_start();
+						woocommerce_mini_cart();
+						$mini_cart = ob_get_clean();
+						$retval['fragments'] = apply_filters(
+							'woocommerce_add_to_cart_fragments',
+							array(
+								'div.widget_shopping_cart_content' => '<div class="widget_shopping_cart_content">' . $mini_cart . '</div>',
+							)
+						);
+						$retval['cart_hash'] = WC()->cart->get_cart_hash();
+					}
 				}
 			}
 		}
