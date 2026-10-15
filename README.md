@@ -206,3 +206,67 @@ These are faithful to the original so that the page renders identically. They ar
 - the scroll-and-notice JavaScript is hard-coded to `#tablepress-39-scroll-wrapper`,
   so on any table other than 39 the confirmation message has nowhere to go
 - the stored meta key is `prodcut_id`, spelled that way in the original
+
+---
+
+## 1.1.0 — re-import updates products instead of needing them deleted (15 Oct 2026)
+
+**Before:** every import created a brand-new product for every row, so the only
+way to re-import was to delete all products first. Every wine's page, address and
+search history was thrown away each time, and the producer pages (Chateau
+Pradeaux, Guy Breton, Planque, ...) kept Buy buttons pointing at products deleted
+long ago — every click answered "There are no items available at this time".
+
+**Now** a product is identified by its row: **wine + vintage + unit + status**
+(`_bvwl_key`). Status is in the key on purpose: the same wine in bond and duty paid
+are two prices and must never merge.
+
+| On import | What happens |
+|---|---|
+| row matches a product | price, stock, description, category, vintage updated in place; address kept |
+| row matches nothing | new product |
+| product no longer on any imported table | stock 0 / out of stock — **not deleted**; page stays, comes back when re-listed |
+| same wine twice on one sheet | both rows sell the one product; listed in the import report |
+
+`_bvwl_tables` records which tables' latest import listed a product, so a wine that
+leaves the Transit table but is still on the Full List stays in stock.
+
+After an import, the next admin screen shows a report: *N new, N updated, N
+unchanged, N no longer listed*. An unchanged re-import of the 745-row list takes
+~2 s (was ~4 min) and changes nothing.
+
+### The one-off adoption (`adopt_existing_products()`)
+
+Products made by 1.0 had no key. On first run each one is keyed from the table row
+it was created for. Where two products turned out to be the same wine (the 31
+Transit rows are identical to Full List rows and had been imported twice, plus one
+row duplicated on the sheet), the first is kept, tables re-pointed at it, the spare
+moved to Drafts (never deleted) with `_bvwl_merged_into`, and its old address 301s
+to the kept one. Live, 15 Oct: 744 keyed, 32 merged, 776 → 744 published.
+Rollback data: `~/BACKUP-import-v11-2026-10-15/`.
+
+### Render side
+
+Each table row resolves its product through the key, not the stored ID — this is
+what fixed the producer pages. Rows with no live product show **Sold out** instead
+of a "+" that can only fail. The "added to your cart" message now appears above
+whichever table was clicked (it was hard-wired to table 39).
+
+⚠ **TablePress caches each table's finished HTML for a day, for logged-out visitors
+only** — so whoever runs the import never sees a stale table. The plugin invalidates
+all table caches after an import and on `woocommerce_product_set_stock_status`
+(a wine selling out or coming back). Without that, the producer pages kept pointing
+at the old products after adoption even though the data was right.
+
+## Product pages (1.1.0)
+
+The X theme's product tabs are switched off on this site (`wc_pdc_tabs = no`), and
+the description only ever rendered inside them — so the descriptions written for
+every wine reached no page a customer could see, only the hidden JSON-LD. Now
+printed in the summary with a Vintage / units / In bond–Duty paid line (skipped if
+the tabs are ever re-enabled, so it never shows twice). Yoast title gets the
+vintage ("Pinot Noir Schueller 2023 - Blast Vintners"); empty meta descriptions
+fall back to the first ~155 characters of the description.
+
+Product **names** deliberately do not get the vintage: Joe's back office reads
+orders by name.

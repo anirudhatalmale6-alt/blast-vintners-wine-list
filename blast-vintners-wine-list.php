@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blast Vintners Wine List
  * Description: The bespoke wine-list storefront: the Buy column and expandable descriptions on TablePress tables, the add-to-cart endpoint behind them, and the spreadsheet-import-to-WooCommerce-product step. Previously this code lived inside the TablePress plugin's own source files and inside the X theme's functions.php, which meant updating either one destroyed it. It now lives here, on documented hooks only.
- * Version: 1.0.0
+ * Version: 1.1.0
  * Author: Anirudha Talmale
  * Requires PHP: 7.4
  *
@@ -19,8 +19,24 @@ final class BVWL_Wine_List {
 
 	const META_KEY = '_table_press_woo_products';
 
+	/*
+	 * Since 1.1.0 a product is identified by what the spreadsheet row says it is
+	 * -- wine + vintage + unit + status -- rather than by the ID the last import
+	 * happened to give it. That is what lets a re-import UPDATE the products that
+	 * are already there instead of needing them all deleted first.
+	 */
+	const KEY_META     = '_bvwl_key';      // normalised "wine|vintage|unit|status"
+	const TABLES_META  = '_bvwl_tables';   // ids of the tables whose latest import listed this product
+	const VINTAGE_META = '_bvwl_vintage';
+	const UNIT_META    = '_bvwl_unit';
+	const STATUS_META  = '_bvwl_status';
+	const ADOPTED_OPTION = 'bvwl_adopted_existing';
+
 	/** @var array<int,array> cached row->product maps, keyed by TablePress table id */
 	private $row_products_cache = array();
+
+	/** @var array|null per-request product index, see product_index() */
+	private $product_index = null;
 
 	public static function instance() {
 		static $inst = null;
@@ -51,6 +67,171 @@ final class BVWL_Wine_List {
 		// know about the new table and the lookup comes back empty.
 		add_action( 'tablepress_event_added_table', array( $this, 'on_table_written' ), 10, 1 );
 		add_action( 'tablepress_event_saved_table', array( $this, 'on_table_written' ), 10, 1 );
+		add_action( 'admin_notices', array( $this, 'print_import_report' ) );
+
+		// TablePress keeps each table's finished HTML -- Buy buttons and "Sold
+		// out" included -- for up to a day, for logged-out visitors only (so the
+		// person who runs the import never sees a stale one). Throw it away
+		// whenever what those buttons depend on changes.
+		add_action( 'woocommerce_product_set_stock_status', array( $this, 'schedule_table_cache_flush' ) );
+		add_action( 'shutdown', array( $this, 'maybe_flush_table_caches' ) );
+
+		// --- single product page: vintage + description, search snippet ----
+		add_action( 'woocommerce_single_product_summary', array( $this, 'product_page_details' ), 25 );
+		add_filter( 'wpseo_title', array( $this, 'seo_title' ) );
+		add_filter( 'wpseo_metadesc', array( $this, 'seo_description' ) );
+		add_filter( 'wpseo_opengraph_desc', array( $this, 'seo_description' ) );
+		add_action( 'template_redirect', array( $this, 'redirect_merged_duplicate' ) );
+	}
+
+	/**
+	 * A duplicate product hidden by adopt_existing_products() leaves its old
+	 * address behind. Send it, permanently, to the product it was merged into.
+	 */
+	public function redirect_merged_duplicate() {
+		if ( ! is_404() ) {
+			return;
+		}
+		$slug = get_query_var( 'name' );
+		if ( ! $slug || 'product' !== get_query_var( 'post_type' ) && ! get_query_var( 'product' ) ) {
+			return;
+		}
+		global $wpdb;
+		$keep = (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT m.meta_value FROM {$wpdb->posts} p JOIN {$wpdb->postmeta} m ON m.post_id = p.ID AND m.meta_key = '_bvwl_merged_into'
+				  WHERE p.post_type = 'product' AND p.post_status = 'draft' AND p.post_name = %s LIMIT 1",
+				$slug
+			)
+		);
+		if ( $keep && 'publish' === get_post_status( $keep ) ) {
+			wp_safe_redirect( get_permalink( $keep ), 301 );
+			exit;
+		}
+	}
+
+	/* =====================================================================
+	 * TablePress output cache
+	 * ===================================================================== */
+
+	private $flush_tables = false;
+
+	public function schedule_table_cache_flush() {
+		$this->flush_tables = true;
+	}
+
+	public function maybe_flush_table_caches() {
+		if ( $this->flush_tables ) {
+			$this->flush_table_caches();
+		}
+	}
+
+	/** Once per request at most; covers every table, since any of them can show a given wine. */
+	public function flush_table_caches() {
+		$this->flush_tables = false;
+		if ( class_exists( 'TablePress' ) && isset( TablePress::$model_table ) && method_exists( TablePress::$model_table, 'invalidate_table_output_caches' ) ) {
+			TablePress::$model_table->invalidate_table_output_caches();
+			return true;
+		}
+		return false;
+	}
+
+	/* =====================================================================
+	 * Identity of a wine: the row key
+	 * ===================================================================== */
+
+	private static function norm( $s ) {
+		$s = html_entity_decode( (string) $s, ENT_QUOTES, 'UTF-8' );
+		$s = preg_replace( '/\s+/u', ' ', $s );
+		return function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $s ), 'UTF-8' ) : strtolower( trim( $s ) );
+	}
+
+	/**
+	 * Status (IB / DP) is part of the key on purpose: the same wine can be on the
+	 * list in bond AND duty paid at two different prices, and those must never
+	 * be merged into one product.
+	 */
+	public static function make_key( $wine, $vintage, $unit, $status ) {
+		return self::norm( $wine ) . '|' . self::norm( $vintage ) . '|' . self::norm( $unit ) . '|' . self::norm( $status );
+	}
+
+	/** Find a header column by any of its known names, case-insensitively. */
+	private static function find_col( array $header, array $names ) {
+		foreach ( $names as $want ) {
+			foreach ( $header as $idx => $label ) {
+				if ( 0 === strcasecmp( trim( (string) $label ), $want ) ) {
+					return $idx;
+				}
+			}
+		}
+		return false;
+	}
+
+	/** Column positions for one table's header row. */
+	private static function columns( array $header ) {
+		return array(
+			'cat'     => self::find_col( $header, array( 'Category', 'Region' ) ),
+			'wine'    => self::find_col( $header, array( 'Wine', 'Name' ) ),
+			'desc'    => self::find_col( $header, array( 'Description' ) ),
+			'cost'    => self::find_col( $header, array( 'Inc Duty & Vat', 'Inc Duty and Vat', 'Price' ) ),
+			'unit'    => self::find_col( $header, array( 'Unit' ) ),
+			'vintage' => self::find_col( $header, array( 'Vintage' ) ),
+			'qty'     => self::find_col( $header, array( 'Bottles', 'Quantity', 'Qty' ) ),
+			'status'  => self::find_col( $header, array( 'Status' ) ),
+		);
+	}
+
+	private static function cell( array $row, $idx ) {
+		return ( false !== $idx && isset( $row[ $idx ] ) ) ? (string) $row[ $idx ] : '';
+	}
+
+	private static function row_key( array $row, array $cols ) {
+		return self::make_key(
+			self::cell( $row, $cols['wine'] ),
+			self::cell( $row, $cols['vintage'] ),
+			self::cell( $row, $cols['unit'] ),
+			self::cell( $row, $cols['status'] )
+		);
+	}
+
+	/**
+	 * Every product, once per request: id => [status, stock_status, key], plus
+	 * key => id for the keyed ones. One query instead of one per table row.
+	 */
+	private function product_index( $refresh = false ) {
+		if ( null !== $this->product_index && ! $refresh ) {
+			return $this->product_index;
+		}
+		global $wpdb;
+		$rows = $wpdb->get_results(
+			$wpdb->prepare(
+				"SELECT p.ID, p.post_status, k.meta_value AS k, s.meta_value AS ss
+				   FROM {$wpdb->posts} p
+				   LEFT JOIN {$wpdb->postmeta} k ON k.post_id = p.ID AND k.meta_key = %s
+				   LEFT JOIN {$wpdb->postmeta} s ON s.post_id = p.ID AND s.meta_key = '_stock_status'
+				  WHERE p.post_type = 'product' AND p.post_status IN ('publish','private','draft','pending')
+				  ORDER BY p.ID ASC",
+				self::KEY_META
+			)
+		);
+		$by_id  = array();
+		$by_key = array();
+		foreach ( $rows as $r ) {
+			$id = (int) $r->ID;
+			$by_id[ $id ] = array(
+				'status' => $r->post_status,
+				'stock'  => (string) $r->ss,
+				'key'    => (string) $r->k,
+			);
+			// Published wins over a hidden one with the same key; otherwise the oldest.
+			if ( '' !== (string) $r->k ) {
+				if ( ! isset( $by_key[ $r->k ] ) || ( 'publish' === $r->post_status && 'publish' !== $by_id[ $by_key[ $r->k ] ]['status'] ) ) {
+					$by_key[ $r->k ] = $id;
+				}
+			}
+		}
+		$this->product_index = array( 'by_id' => $by_id, 'by_key' => $by_key );
+		return $this->product_index;
 	}
 
 	/* =====================================================================
@@ -123,11 +304,36 @@ final class BVWL_Wine_List {
 			}
 
 			if ( $has_a_product && ! empty( $table['visibility']['rows'] ) ) {
+
+				// The row itself says which wine it is. Resolving through that,
+				// rather than trusting the stored product ID, is what keeps the
+				// producer pages working: their stored IDs pointed at products a
+				// later delete-and-reimport had removed, so every Buy button on
+				// them answered "There are no items available at this time".
+				$raw   = json_decode( get_post( $post_id )->post_content, true );
+				$cols  = ( is_array( $raw ) && ! empty( $raw[0] ) ) ? self::columns( $raw[0] ) : null;
+				$index = $this->product_index();
+
 				$n = 0;
 				foreach ( $table['visibility']['rows'] as $key => $visible ) {
 					if ( $key > 0 && $visible ) {
+						$pid = isset( $meta[ $key ]['prodcut_id'] ) ? (int) $meta[ $key ]['prodcut_id'] : 0;
+
+						if ( $cols && false !== $cols['wine'] && isset( $raw[ $key ] ) && is_array( $raw[ $key ] ) ) {
+							$k = self::row_key( $raw[ $key ], $cols );
+							if ( isset( $index['by_key'][ $k ] ) && 'publish' === $index['by_id'][ $index['by_key'][ $k ] ]['status'] ) {
+								$pid = $index['by_key'][ $k ];
+							}
+						}
+
+						$available = $pid
+							&& isset( $index['by_id'][ $pid ] )
+							&& 'publish' === $index['by_id'][ $pid ]['status']
+							&& 'outofstock' !== $index['by_id'][ $pid ]['stock'];
+
 						$row_products[ $n ] = array(
-							'product_id'  => isset( $meta[ $key ]['prodcut_id'] ) ? $meta[ $key ]['prodcut_id'] : 0,
+							'product_id'  => $pid,
+							'available'   => $available,
 							'description' => isset( $meta[ $key ]['description'] ) ? $meta[ $key ]['description'] : '',
 							'qty'         => isset( $meta[ $key ]['qty'] ) ? $meta[ $key ]['qty'] : '',
 							'unit'        => isset( $meta[ $key ]['unit'] ) ? $meta[ $key ]['unit'] : '',
@@ -242,6 +448,15 @@ final class BVWL_Wine_List {
 	private function build_buy_cell( DOMDocument $doc, $row_idx, array $rp ) {
 		$td = $doc->createElement( 'td' );
 		$td->setAttribute( 'class', 'column-5' );
+
+		// A wine that is gone or sold out says so, instead of offering a "+"
+		// that can only ever end in an error message.
+		if ( isset( $rp['available'] ) && ! $rp['available'] ) {
+			$span = $doc->createElement( 'span', 'Sold out' );
+			$span->setAttribute( 'class', 'bvwl-soldout' );
+			$td->appendChild( $span );
+			return $td;
+		}
 
 		$a = $doc->createElement( 'a', '+' );
 		// No space after the colon: DOMDocument percent-encodes spaces in href
@@ -363,8 +578,16 @@ final class BVWL_Wine_List {
 
       var ajaxurl = '<?php echo $ajaxurl; ?>';
 
-      jQuery( "#tbp-woo-qty"+r_idx ).append( "<p>Processing...</p>" );
-      jQuery('#tablepress-39-scroll-wrapper .woocommerce-notices-wrapper').remove();
+      /* Where to show "added to your cart". This used to be hard-wired to the
+         Full List (#tablepress-39-...), so on a producer page the message went
+         nowhere. Use the wrapper around the table that was actually clicked. */
+      var $row  = jQuery( "#tbp-woo-qty"+r_idx );
+      var $box  = $row.closest( '[id$="-scroll-wrapper"]' );
+      if ( ! $box.length ) { $box = $row.closest( '.dataTables_wrapper' ); }
+      if ( ! $box.length ) { $box = $row.closest( 'table' ).parent(); }
+
+      $row.append( "<p>Processing...</p>" );
+      $box.find('.woocommerce-notices-wrapper').remove();
         var qty = jQuery("#tbp-woo-qt"+r_idx).val();
         var id = p_id;
         var data = {
@@ -373,21 +596,10 @@ final class BVWL_Wine_List {
           qty: qty ? qty : 1
         };
         jQuery.post(ajaxurl, data, function(response) {
-          if( response.success  ) {
-             jQuery( "#tbp-woo-qty"+r_idx ).remove();
-            jQuery('#tablepress-39-scroll-wrapper').prepend(response.message);
-            bvwlApplyCart(response);
-            jQuery('html, body').animate({
-          scrollTop: jQuery('#tablepress-39-scroll-wrapper').offset().top
-         }, 2000);
-          }else{
-        jQuery('html, body').animate({
-          scrollTop: jQuery('#tablepress-39-scroll-wrapper').offset().top
-         }, 2000);
-            jQuery('#tablepress-39-scroll-wrapper').prepend(response.message);
-            bvwlApplyCart(response);
-            jQuery( "#tbp-woo-qty"+r_idx ).remove();
-          }
+          $box.prepend(response.message);
+          bvwlApplyCart(response);
+          $row.remove();
+          jQuery('html, body').animate({ scrollTop: $box.offset().top }, 2000);
         }, 'json');
 
       }
@@ -399,6 +611,9 @@ final class BVWL_Wine_List {
     .tbp-woo-qt{ float: left !important;height: auto !important;max-width: 42px !important;padding: 3px 2px !important;text-align: center !important;margin-right: 2px !important;}
     .tbp-woo-desc{display: none;padding: 20px 0 !important;}
     .tbpwoodesc{float: right; text-align: right;}
+    .bvwl-soldout{color:#999;font-size:12px;white-space:nowrap;}
+    .bvwl-product-details{margin:0 0 1.5em;}
+    .bvwl-product-details .bvwl-facts{margin:0 0 .75em;}
     .tablepress tbody td{cursor: pointer !important;}
     .column-3{width:50% !important; max-width: 50% !important;}
 
@@ -522,7 +737,7 @@ final class BVWL_Wine_List {
 				'<tr class="top-border" id="bvwl-woo-row">' +
 				'<th class="column-1" scope="row"><label for="bvwl-woo-product">Add Woocommerce Product:</label></th>' +
 				'<td class="column-2"><input type="checkbox" id="bvwl-woo-product" name="import[woo_product]" value="1"/>' +
-				'<p class="description" style="margin:4px 0 0">Create a WooCommerce product for every row, and wire the Buy column to them.</p>' +
+				'<p class="description" style="margin:4px 0 0">Creates or updates the shop product for every row (matched on wine, vintage, unit and status). Wines no longer on the sheet are set to out of stock, not deleted. <strong>No need to delete products first.</strong></p>' +
 				'</td></tr>';
 
 			function inject() {
@@ -579,58 +794,108 @@ final class BVWL_Wine_List {
 	}
 
 	/**
-	 * Walk the table's rows, create a WooCommerce product for each one, and store
-	 * the row -> product map. Column names are matched case-insensitively and
-	 * against the alternatives this shop's spreadsheets actually use, which the
-	 * previous version did not do.
+	 * Walk the table's rows and bring the WooCommerce products in line with them.
+	 *
+	 * Up to 1.0 this created a brand new product for every row, every time, so the
+	 * only way to re-import was to delete every product first -- which threw away
+	 * each wine's page, its address and whatever search ranking it had built up.
+	 *
+	 * Now each row is matched to the product that already represents it (by wine +
+	 * vintage + unit + status) and that product is updated in place:
+	 *
+	 *   row matches a product        -> price, stock, description, category updated
+	 *   row matches nothing          -> new product, as before
+	 *   product no longer on any list -> set out of stock, NOT deleted; its page
+	 *                                   stays up and it comes back when re-listed
+	 *
+	 * The spreadsheet stays the source of truth for everything it has a column for.
 	 */
 	public function sync_products_for_table( $table_id ) {
 		if ( ! class_exists( 'woocommerce' ) ) {
-			return;
+			return null;
 		}
 		$post_id = $this->table_id_to_post_id( $table_id );
 		if ( ! $post_id ) {
-			return;
+			return null;
 		}
 		$rows = json_decode( get_post( $post_id )->post_content, true );
 		if ( ! is_array( $rows ) || empty( $rows[0] ) ) {
-			return;
+			return null;
+		}
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 600 ); // a first run creates hundreds of products
 		}
 
-		$header = $rows[0];
-		$col = function ( array $names ) use ( $header ) {
-			foreach ( $names as $want ) {
-				foreach ( $header as $idx => $label ) {
-					if ( 0 === strcasecmp( trim( (string) $label ), $want ) ) {
-						return $idx;
-					}
+		// Products imported before 1.1.0 carry no key yet. Give them one first,
+		// or this import could not recognise them and would create duplicates.
+		if ( ! get_option( self::ADOPTED_OPTION ) ) {
+			$this->adopt_existing_products( false );
+		}
+
+		$cols  = self::columns( $rows[0] );
+		$index = $this->product_index( true );
+		$table = (string) $table_id;
+
+		$old_map = get_post_meta( $post_id, self::META_KEY, true );
+		$old_ids = array();
+		if ( is_array( $old_map ) ) {
+			foreach ( $old_map as $e ) {
+				if ( is_array( $e ) && ! empty( $e['prodcut_id'] ) ) {
+					$old_ids[ (int) $e['prodcut_id'] ] = true;
 				}
 			}
-			return false;
-		};
+		}
 
-		$k_cat     = $col( array( 'Category', 'Region' ) );
-		$k_wine    = $col( array( 'Wine', 'Name' ) );
-		$k_desc    = $col( array( 'Description' ) );
-		$k_cost    = $col( array( 'Inc Duty & Vat', 'Inc Duty and Vat', 'Price' ) );
-		$k_unit    = $col( array( 'Unit' ) );
-		$k_vintage = $col( array( 'Vintage' ) );
-		$k_qty     = $col( array( 'Bottles', 'Quantity', 'Qty' ) );
+		$report = array(
+			'table'      => $table,
+			'title'      => get_the_title( $post_id ),
+			'rows'       => count( $rows ) - 1,
+			'created'    => 0,
+			'updated'    => 0,
+			'unchanged'  => 0,
+			'skipped'    => 0,
+			'duplicates' => array(),
+			'retired'    => 0,
+		);
 
-		$map = array( 0 => 0 );
+		$seen = array(); // key => product id, within this import
+		$map  = array( 0 => 0 );
 		for ( $i = 1; $i < count( $rows ); $i++ ) {
-			$row = $rows[ $i ];
+			$row  = is_array( $rows[ $i ] ) ? $rows[ $i ] : array();
 			$info = array(
-				'title'       => ( false !== $k_wine && isset( $row[ $k_wine ] ) ) ? trim( (string) $row[ $k_wine ] ) : '',
-				'description' => ( false !== $k_desc && isset( $row[ $k_desc ] ) ) ? (string) $row[ $k_desc ] : '',
-				'category'    => ( false !== $k_cat && isset( $row[ $k_cat ] ) ) ? (string) $row[ $k_cat ] : '',
-				'price'       => ( false !== $k_cost && isset( $row[ $k_cost ] ) ) ? trim( str_replace( '£', '', (string) $row[ $k_cost ] ) ) : '',
-				'note'        => ( false !== $k_vintage && isset( $row[ $k_vintage ] ) ) ? (string) $row[ $k_vintage ] : '',
-				'qty'         => ( false !== $k_qty && isset( $row[ $k_qty ] ) ) ? (string) $row[ $k_qty ] : '',
-				'unit'        => ( false !== $k_unit && isset( $row[ $k_unit ] ) ) ? (string) $row[ $k_unit ] : '',
+				'title'       => trim( self::cell( $row, $cols['wine'] ) ),
+				'description' => self::cell( $row, $cols['desc'] ),
+				'category'    => trim( self::cell( $row, $cols['cat'] ) ),
+				'price'       => trim( str_replace( array( '£', ',' ), '', self::cell( $row, $cols['cost'] ) ) ),
+				'note'        => self::cell( $row, $cols['vintage'] ),
+				'qty'         => trim( self::cell( $row, $cols['qty'] ) ),
+				'unit'        => trim( self::cell( $row, $cols['unit'] ) ),
+				'status'      => trim( self::cell( $row, $cols['status'] ) ),
 			);
+			$key = self::row_key( $row, $cols );
 
-			$product_id = ( '' !== $info['title'] && '' !== $info['price'] ) ? $this->create_product( $info ) : 0;
+			$product_id = 0;
+			if ( '' === $info['title'] || '' === $info['price'] ) {
+				$report['skipped']++;
+			} elseif ( isset( $seen[ $key ] ) ) {
+				// The same wine twice on one sheet: both rows sell the one product.
+				$product_id = $seen[ $key ];
+				$report['duplicates'][] = $info['title'] . ( '' !== $info['note'] ? ' ' . $info['note'] : '' );
+			} elseif ( isset( $index['by_key'][ $key ] ) ) {
+				$product_id = $index['by_key'][ $key ];
+				$this->update_product( $product_id, $info ) ? $report['updated']++ : $report['unchanged']++;
+			} else {
+				$product_id = $this->create_product( $info );
+				if ( $product_id ) {
+					update_post_meta( $product_id, self::KEY_META, $key );
+					$report['created']++;
+				}
+			}
+
+			if ( $product_id ) {
+				$seen[ $key ] = $product_id;
+				$this->set_listed_in( $product_id, $table, true );
+			}
 
 			$map[ $i ] = array(
 				'prodcut_id'  => $product_id,               // key spelling kept: the renderer reads it
@@ -641,48 +906,373 @@ final class BVWL_Wine_List {
 		}
 
 		update_post_meta( $post_id, self::META_KEY, $map );
+
+		// Wines this table listed last time and no longer does.
+		$now = array_flip( array_values( $seen ) );
+		foreach ( array_keys( $old_ids ) as $gone ) {
+			if ( isset( $now[ $gone ] ) ) {
+				continue;
+			}
+			$still_listed = $this->set_listed_in( $gone, $table, false );
+			if ( ! $still_listed && $this->retire_product( $gone ) ) {
+				$report['retired']++;
+			}
+		}
+
+		$this->product_index( true );
+		$this->schedule_table_cache_flush();
+		$report['time'] = time();
+		update_option( 'bvwl_last_import_' . $table, $report, false );
+		if ( get_current_user_id() ) {
+			set_transient( 'bvwl_import_report_' . get_current_user_id(), $report, HOUR_IN_SECONDS );
+		}
+		return $report;
 	}
 
-	private function create_product( array $info ) {
-		$post_id = wp_insert_post(
-			array(
-				'post_author'  => get_current_user_id(),
-				'post_content' => $info['description'],
-				'post_status'  => 'publish',
-				'post_title'   => $info['title'],
-				'post_type'    => 'product',
-			),
-			true
-		);
-		if ( is_wp_error( $post_id ) || ! $post_id ) {
-			return 0;
+	/**
+	 * Record (or drop) that $table's latest import lists this product.
+	 * Returns whether any table still lists it.
+	 */
+	private function set_listed_in( $product_id, $table, $listed ) {
+		$tables = get_post_meta( $product_id, self::TABLES_META, true );
+		$tables = is_array( $tables ) ? $tables : array();
+		$had    = in_array( $table, $tables, true );
+		if ( $listed && ! $had ) {
+			$tables[] = $table;
+			update_post_meta( $product_id, self::TABLES_META, $tables );
+		} elseif ( ! $listed && $had ) {
+			$tables = array_values( array_diff( $tables, array( $table ) ) );
+			update_post_meta( $product_id, self::TABLES_META, $tables );
+		}
+		return ! empty( $tables );
+	}
+
+	/** Off the list: out of stock, but the page and its address stay. */
+	private function retire_product( $product_id ) {
+		$p = wc_get_product( $product_id );
+		if ( ! $p || '' === (string) get_post_meta( $product_id, self::KEY_META, true ) ) {
+			return false; // never touch a product this importer does not manage
+		}
+		if ( 'outofstock' === $p->get_stock_status() && 0 === (int) $p->get_stock_quantity() ) {
+			return false;
+		}
+		$p->set_manage_stock( true );
+		$p->set_stock_quantity( 0 );
+		$p->set_stock_status( 'outofstock' );
+		$p->save();
+		return true;
+	}
+
+	private static function stock_from( array $info ) {
+		return ( '' !== $info['qty'] && is_numeric( $info['qty'] ) ) ? (int) $info['qty'] : 1;
+	}
+
+	private function save_wine_meta( $product_id, array $info ) {
+		update_post_meta( $product_id, self::VINTAGE_META, $info['note'] );
+		update_post_meta( $product_id, self::UNIT_META, $info['unit'] );
+		update_post_meta( $product_id, self::STATUS_META, $info['status'] );
+	}
+
+	private static function same_text( $a, $b ) {
+		$d = function ( $s ) {
+			return str_replace( "\r\n", "\n", trim( html_entity_decode( (string) $s, ENT_QUOTES | ENT_HTML5, 'UTF-8' ) ) );
+		};
+		return $d( $a ) === $d( $b );
+	}
+
+	/** Returns true if anything actually changed. */
+	private function update_product( $product_id, array $info ) {
+		$p = wc_get_product( $product_id );
+		if ( ! $p ) {
+			return false;
+		}
+		$changed = false;
+
+		// WordPress may store "&" as "&amp;" (it depends on who runs the import),
+		// so compare decoded text -- otherwise a product looks changed every time.
+		if ( ! self::same_text( $p->get_name(), $info['title'] ) ) {
+			$p->set_name( $info['title'] ); // the address (slug) is deliberately left alone
+			$changed = true;
+		}
+		if ( ! self::same_text( $p->get_description(), $info['description'] ) ) {
+			$p->set_description( $info['description'] );
+			$changed = true;
+		}
+		if ( wc_format_decimal( $p->get_regular_price() ) !== wc_format_decimal( $info['price'] ) ) {
+			$p->set_regular_price( $info['price'] );
+			$changed = true;
+		}
+		if ( (string) $p->get_purchase_note() !== (string) $info['note'] ) {
+			$p->set_purchase_note( $info['note'] );
+			$changed = true;
+		}
+		$stock = self::stock_from( $info );
+		if ( ! $p->get_manage_stock() || (int) $p->get_stock_quantity() !== $stock ) {
+			$p->set_manage_stock( true );
+			$p->set_stock_quantity( $stock );
+			$changed = true;
+		}
+		if ( $changed ) {
+			$p->save(); // WooCommerce sets in-stock / out-of-stock from the quantity
 		}
 
 		if ( '' !== $info['category'] ) {
+			$names = wp_get_object_terms( $product_id, 'product_cat', array( 'fields' => 'names' ) );
+			if ( is_wp_error( $names ) || 1 !== count( $names ) || 0 !== strcasecmp( html_entity_decode( $names[0] ), $info['category'] ) ) {
+				wp_set_object_terms( $product_id, $info['category'], 'product_cat' );
+				$changed = true;
+			}
+		}
+
+		if ( get_post_meta( $product_id, self::VINTAGE_META, true ) !== $info['note']
+			|| get_post_meta( $product_id, self::UNIT_META, true ) !== $info['unit']
+			|| get_post_meta( $product_id, self::STATUS_META, true ) !== $info['status'] ) {
+			$this->save_wine_meta( $product_id, $info );
+		}
+		return $changed;
+	}
+
+	private function create_product( array $info ) {
+		$p = new WC_Product_Simple();
+		$p->set_name( $info['title'] );
+		$p->set_status( 'publish' );
+		$p->set_catalog_visibility( 'visible' );
+		$p->set_description( $info['description'] );
+		$p->set_regular_price( $info['price'] );
+		$p->set_purchase_note( $info['note'] );
+		$p->set_backorders( 'no' );
+		$p->set_manage_stock( true );
+		$p->set_stock_quantity( self::stock_from( $info ) );
+		$post_id = $p->save();
+		if ( ! $post_id ) {
+			return 0;
+		}
+		if ( '' !== $info['category'] ) {
 			wp_set_object_terms( $post_id, $info['category'], 'product_cat' );
 		}
-		wp_set_object_terms( $post_id, 'simple', 'product_type' );
-
-		$quantity = ( '' !== $info['qty'] ) ? $info['qty'] : 1;
-
-		update_post_meta( $post_id, '_visibility', 'visible' );
-		update_post_meta( $post_id, '_stock_status', 'instock' );
-		update_post_meta( $post_id, '_virtual', 'no' );
-		update_post_meta( $post_id, '_regular_price', $info['price'] );
-		update_post_meta( $post_id, '_purchase_note', $info['note'] );
-		update_post_meta( $post_id, '_featured', 'no' );
-		update_post_meta( $post_id, '_weight', '' );
-		update_post_meta( $post_id, '_length', '' );
-		update_post_meta( $post_id, '_width', '' );
-		update_post_meta( $post_id, '_height', '' );
-		update_post_meta( $post_id, '_sale_price_dates_to', '' );
-		update_post_meta( $post_id, '_price', $info['price'] );
-		update_post_meta( $post_id, '_sold_individually', '' );
-		update_post_meta( $post_id, '_backorders', 'no' );
-		update_post_meta( $post_id, '_stock', $quantity );
-		update_post_meta( $post_id, '_manage_stock', 'yes' );
-
+		$this->save_wine_meta( $post_id, $info );
 		return $post_id;
+	}
+
+	/**
+	 * One-off, for products imported before 1.1.0: work out each one's key from
+	 * the table row it was created for, so the next import recognises it.
+	 *
+	 * Only tables whose products are still published take part -- the producer
+	 * tables point at products deleted long ago and are left alone.
+	 *
+	 * Where two products turn out to be the same wine (the same row imported into
+	 * both the Full List and the Transit table, or a row duplicated on one sheet)
+	 * the first is kept, the tables are re-pointed at it, and the spare is moved
+	 * to Drafts -- hidden, not deleted.
+	 */
+	public function adopt_existing_products( $dry_run = true ) {
+		$opt = json_decode( (string) get_option( 'tablepress_tables' ), true );
+		$table_posts = isset( $opt['table_post'] ) && is_array( $opt['table_post'] ) ? $opt['table_post'] : array();
+		uksort( $table_posts, function ( $a, $b ) { return (int) $a - (int) $b; } );
+
+		$out = array( 'tables' => array(), 'keyed' => 0, 'merged' => array(), 'drafted' => 0, 'dry_run' => $dry_run );
+		$claimed = array(); // key => product id
+
+		foreach ( $table_posts as $table_id => $post_id ) {
+			$post = get_post( $post_id );
+			$map  = get_post_meta( $post_id, self::META_KEY, true );
+			$rows = $post ? json_decode( $post->post_content, true ) : null;
+			if ( ! is_array( $map ) || ! is_array( $rows ) || empty( $rows[0] ) ) {
+				continue;
+			}
+			$live = 0;
+			foreach ( $map as $e ) {
+				if ( is_array( $e ) && ! empty( $e['prodcut_id'] ) && 'publish' === get_post_status( (int) $e['prodcut_id'] ) ) {
+					$live++;
+				}
+			}
+			if ( ! $live ) {
+				continue;
+			}
+
+			$cols = self::columns( $rows[0] );
+			$map_changed = false;
+			$t = array( 'table' => (string) $table_id, 'live' => $live, 'keyed' => 0, 'repointed' => 0 );
+
+			foreach ( $map as $i => $e ) {
+				if ( ! $i || ! is_array( $e ) || empty( $e['prodcut_id'] ) || ! isset( $rows[ $i ] ) || ! is_array( $rows[ $i ] ) ) {
+					continue;
+				}
+				$pid = (int) $e['prodcut_id'];
+				if ( 'publish' !== get_post_status( $pid ) ) {
+					continue;
+				}
+				$key = self::row_key( $rows[ $i ], $cols );
+
+				if ( isset( $claimed[ $key ] ) && $claimed[ $key ] !== $pid ) {
+					$keep = $claimed[ $key ];
+					$out['merged'][ $pid ] = $keep;
+					$map[ $i ]['prodcut_id'] = $keep;
+					$map_changed = true;
+					$t['repointed']++;
+					if ( ! $dry_run ) {
+						$this->set_listed_in( $keep, (string) $table_id, true );
+					}
+					continue;
+				}
+
+				$claimed[ $key ] = $pid;
+				$t['keyed']++;
+				if ( ! $dry_run ) {
+					update_post_meta( $pid, self::KEY_META, $key );
+					$this->set_listed_in( $pid, (string) $table_id, true );
+					$this->save_wine_meta(
+						$pid,
+						array(
+							'note'   => self::cell( $rows[ $i ], $cols['vintage'] ),
+							'unit'   => trim( self::cell( $rows[ $i ], $cols['unit'] ) ),
+							'status' => trim( self::cell( $rows[ $i ], $cols['status'] ) ),
+						)
+					);
+				}
+			}
+
+			if ( $map_changed && ! $dry_run ) {
+				update_post_meta( $post_id, self::META_KEY, $map );
+			}
+			$out['keyed'] += $t['keyed'];
+			$out['tables'][] = $t;
+		}
+
+		// Spare duplicates: hidden, never deleted, and only if no table still uses them.
+		foreach ( $out['merged'] as $spare => $keep ) {
+			if ( isset( array_flip( $claimed )[ $spare ] ) ) {
+				continue;
+			}
+			if ( ! $dry_run ) {
+				wp_update_post( array( 'ID' => $spare, 'post_status' => 'draft' ) );
+				update_post_meta( $spare, '_bvwl_merged_into', $keep );
+			}
+			$out['drafted']++;
+		}
+
+		if ( ! $dry_run ) {
+			update_option( self::ADOPTED_OPTION, time(), false );
+			$this->product_index( true );
+			$this->flush_table_caches();
+		}
+		return $out;
+	}
+
+	/** After an import, say what it did -- on the next admin screen Joe sees. */
+	public function print_import_report() {
+		$uid = get_current_user_id();
+		if ( ! $uid ) {
+			return;
+		}
+		$r = get_transient( 'bvwl_import_report_' . $uid );
+		if ( ! is_array( $r ) ) {
+			return;
+		}
+		delete_transient( 'bvwl_import_report_' . $uid );
+
+		$parts = array(
+			sprintf( '%d new', $r['created'] ),
+			sprintf( '%d updated', $r['updated'] ),
+			sprintf( '%d unchanged', $r['unchanged'] ),
+			sprintf( '%d no longer listed (now out of stock, pages kept)', $r['retired'] ),
+		);
+		echo '<div class="notice notice-success is-dismissible"><p><strong>Wine list products updated</strong> from &ldquo;' . esc_html( $r['title'] ) . '&rdquo; (' . (int) $r['rows'] . ' rows): ' . esc_html( implode( ', ', $parts ) ) . '.</p>';
+		if ( $r['skipped'] ) {
+			echo '<p>' . (int) $r['skipped'] . ' row(s) had no wine name or no price and were skipped.</p>';
+		}
+		if ( ! empty( $r['duplicates'] ) ) {
+			echo '<p>Listed twice on the sheet (both rows sell the same product): ' . esc_html( implode( '; ', array_slice( $r['duplicates'], 0, 10 ) ) ) . '</p>';
+		}
+		echo '</div>';
+	}
+
+	/* =====================================================================
+	 * Single product page
+	 * ===================================================================== */
+
+	private static function wine_facts( $product_id ) {
+		$vintage = (string) get_post_meta( $product_id, self::VINTAGE_META, true );
+		$unit    = (string) get_post_meta( $product_id, self::UNIT_META, true );
+		$status  = strtoupper( trim( (string) get_post_meta( $product_id, self::STATUS_META, true ) ) );
+		return array( $vintage, $unit, $status );
+	}
+
+	/**
+	 * The theme's product tabs are switched off on this site, and the description
+	 * only ever appeared inside them -- so the descriptions written for every wine
+	 * were on no page a customer could see. Print them in the summary instead,
+	 * with the vintage. Skipped automatically if the tabs are ever switched back
+	 * on, so the description never shows twice.
+	 */
+	public function product_page_details() {
+		global $product;
+		if ( ! $product instanceof WC_Product ) {
+			return;
+		}
+		list( $vintage, $unit, $status ) = self::wine_facts( $product->get_id() );
+
+		$facts = array();
+		if ( '' !== $vintage ) {
+			$facts[] = '<strong>Vintage:</strong> ' . esc_html( $vintage );
+		}
+		if ( is_numeric( $unit ) && (int) $unit > 1 ) {
+			$facts[] = '<strong>Sold in:</strong> ' . (int) $unit . ' bottle units';
+		}
+		if ( 'IB' === $status ) {
+			$facts[] = '<strong>Status:</strong> In bond';
+		} elseif ( 'DP' === $status ) {
+			$facts[] = '<strong>Status:</strong> Duty paid';
+		}
+
+		$tabs_shown  = (bool) has_action( 'woocommerce_after_single_product_summary', 'woocommerce_output_product_data_tabs' );
+		$description = $tabs_shown ? '' : trim( (string) $product->get_description() );
+
+		if ( ! $facts && '' === $description ) {
+			return;
+		}
+		echo '<div class="bvwl-product-details">';
+		if ( $facts ) {
+			echo '<p class="bvwl-facts">' . implode( ' &nbsp;&middot;&nbsp; ', $facts ) . '</p>';
+		}
+		if ( '' !== $description ) {
+			echo '<div class="bvwl-desc">' . wpautop( wp_kses_post( $description ) ) . '</div>';
+		}
+		echo '</div>';
+	}
+
+	/** "Pinot Noir Schueller 2023 - Blast Vintners": people search with the vintage. */
+	public function seo_title( $title ) {
+		if ( ! function_exists( 'is_product' ) || ! is_product() ) {
+			return $title;
+		}
+		$id = get_queried_object_id();
+		list( $vintage ) = self::wine_facts( $id );
+		$name = get_the_title( $id );
+		if ( '' === $vintage || false !== strpos( $title, $vintage ) || '' === $name ) {
+			return $title;
+		}
+		if ( 0 === strpos( $title, $name ) ) {
+			return $name . ' ' . $vintage . substr( $title, strlen( $name ) );
+		}
+		return $title;
+	}
+
+	/** The snippet under the link in Google: the first ~155 characters of the description. */
+	public function seo_description( $desc ) {
+		if ( '' !== trim( (string) $desc ) || ! function_exists( 'is_product' ) || ! is_product() ) {
+			return $desc;
+		}
+		$text = trim( preg_replace( '/\s+/u', ' ', wp_strip_all_tags( (string) get_post_field( 'post_content', get_queried_object_id() ) ) ) );
+		if ( '' === $text ) {
+			return $desc;
+		}
+		if ( function_exists( 'mb_strlen' ) && mb_strlen( $text ) > 155 ) {
+			$cut  = mb_substr( $text, 0, 155 );
+			$text = preg_replace( '/\s+\S*$/u', '', $cut ) . '…';
+		}
+		return $text;
 	}
 }
 
