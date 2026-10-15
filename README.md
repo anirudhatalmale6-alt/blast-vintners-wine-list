@@ -270,3 +270,25 @@ fall back to the first ~155 characters of the description.
 
 Product **names** deliberately do not get the vintage: Joe's back office reads
 orders by name.
+
+## Product codes (1.1.0, same day)
+
+Joe's back office gives every product a unique 8-digit code; he used to strip it
+before importing. With a code column on the sheet (heading `Code`, `Product Code`,
+`Stock Code`, `Item Code`, `Wine Code`, `SKU`, `Ref` or `Reference`, any position):
+
+- rows match on the code first (`_bvwl_code`, leading zeros ignored since Excel drops
+  them), falling back to wine+vintage+unit+status for products that have no code
+  yet; the first such import attaches the codes. A product carrying a *different*
+  code is never matched by name — two codes are two products.
+- correcting a wine's name keeps the same product and address (tested: renamed row
+  → "0 new, 1 updated").
+- the code is saved as the WooCommerce SKU, so it prints on the admin "New order"
+  email; hidden from the product page and its JSON-LD.
+
+⚠ **TablePress stores hidden columns by POSITION.** Every wine table hides exactly
+one column, Description. A code column inserted anywhere but the end shifts it, so
+Description reappears and **"Inc Duty & Vat" (the price) disappears** — proven on
+staging. So on any table WITH a code column, visibility is set by heading via
+`tablepress_table_raw_render_data`: Code + Description hidden, everything else
+shown. Tables without a code column are untouched.

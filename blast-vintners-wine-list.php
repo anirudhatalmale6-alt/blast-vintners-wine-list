@@ -30,7 +30,11 @@ final class BVWL_Wine_List {
 	const VINTAGE_META = '_bvwl_vintage';
 	const UNIT_META    = '_bvwl_unit';
 	const STATUS_META  = '_bvwl_status';
+	const CODE_META    = '_bvwl_code';     // Joe's 8-digit product code, when the sheet carries it
 	const ADOPTED_OPTION = 'bvwl_adopted_existing';
+
+	/** Headings the product-code column may have. Matched case-insensitively. */
+	const CODE_HEADERS = array( 'Code', 'Product Code', 'Stock Code', 'Item Code', 'Wine Code', 'SKU', 'Ref', 'Reference' );
 
 	/** @var array<int,array> cached row->product maps, keyed by TablePress table id */
 	private $row_products_cache = array();
@@ -82,6 +86,58 @@ final class BVWL_Wine_List {
 		add_filter( 'wpseo_metadesc', array( $this, 'seo_description' ) );
 		add_filter( 'wpseo_opengraph_desc', array( $this, 'seo_description' ) );
 		add_action( 'template_redirect', array( $this, 'redirect_merged_duplicate' ) );
+
+		// --- the product code: matched on, never shown to customers --------
+		add_filter( 'tablepress_table_raw_render_data', array( $this, 'hide_code_column' ), 10, 2 );
+		add_filter( 'wc_product_sku_enabled', array( $this, 'sku_only_behind_the_scenes' ) );
+		add_filter( 'woocommerce_structured_data_product', array( $this, 'structured_data_without_code' ), 10, 2 );
+	}
+
+	/**
+	 * The code column is for matching, not for customers.
+	 *
+	 * TablePress remembers hidden columns by POSITION, not by heading. Every wine
+	 * table here hides exactly one column, Description (the Buy column's toggle
+	 * shows it instead). Add a Code column anywhere but the very end and every
+	 * column shifts one place: Description reappears and "Inc Duty & Vat" -- the
+	 * price -- disappears. So on any table that has a code column, visibility is
+	 * decided by heading instead: Code and Description hidden, everything else
+	 * shown, wherever the columns sit. Tables without a code column are left
+	 * exactly as TablePress has them.
+	 */
+	public function hide_code_column( $table, $render_options ) {
+		if ( empty( $table['data'][0] ) || ! is_array( $table['data'][0] ) ) {
+			return $table;
+		}
+		$header = $table['data'][0];
+		if ( false === self::find_col( $header, self::CODE_HEADERS ) ) {
+			return $table;
+		}
+		$hide = array_merge( self::CODE_HEADERS, array( 'Description' ) );
+		foreach ( $header as $idx => $label ) {
+			$table['visibility']['columns'][ $idx ] = ( false === self::find_col( array( $label ), $hide ) ) ? 1 : 0;
+		}
+		return $table;
+	}
+
+	/**
+	 * The code is stored as the WooCommerce SKU so it appears in the admin and on
+	 * the "New order" email Joe receives (WooCommerce prints SKUs on admin emails
+	 * only). Keep it off the public product page.
+	 */
+	public function sku_only_behind_the_scenes( $enabled ) {
+		if ( ! is_admin() && function_exists( 'is_product' ) && is_product() ) {
+			return false;
+		}
+		return $enabled;
+	}
+
+	/** ...and out of the product page's hidden search-engine data too. */
+	public function structured_data_without_code( $markup, $product ) {
+		if ( is_array( $markup ) && $product instanceof WC_Product && isset( $markup['sku'] ) && (string) $markup['sku'] === (string) $product->get_sku() && '' !== (string) $product->get_sku() ) {
+			$markup['sku'] = $product->get_id();
+		}
+		return $markup;
 	}
 
 	/**
@@ -178,7 +234,46 @@ final class BVWL_Wine_List {
 			'vintage' => self::find_col( $header, array( 'Vintage' ) ),
 			'qty'     => self::find_col( $header, array( 'Bottles', 'Quantity', 'Qty' ) ),
 			'status'  => self::find_col( $header, array( 'Status' ) ),
+			'code'    => self::find_col( $header, self::CODE_HEADERS ),
 		);
+	}
+
+	/**
+	 * The code as given, tidied. Excel quietly drops leading zeros from numbers,
+	 * so matching ignores them ("01234567" and "1234567" are the same code).
+	 */
+	private static function row_code( array $row, array $cols ) {
+		return preg_replace( '/\s+/u', '', self::cell( $row, $cols['code'] ) );
+	}
+
+	private static function code_id( $code ) {
+		$code = strtolower( preg_replace( '/\s+/u', '', (string) $code ) );
+		if ( '' !== $code && ctype_digit( $code ) ) {
+			$code = ltrim( $code, '0' );
+			$code = '' === $code ? '0' : $code;
+		}
+		return $code;
+	}
+
+	/**
+	 * Which product does this row describe? The code if the sheet has one;
+	 * otherwise wine + vintage + unit + status. A product that already carries a
+	 * DIFFERENT code is never matched by name -- two codes are two products.
+	 */
+	private static function resolve_row( array $row, array $cols, array $index ) {
+		$code = self::code_id( self::row_code( $row, $cols ) );
+		if ( '' !== $code && isset( $index['by_code'][ $code ] ) ) {
+			return $index['by_code'][ $code ];
+		}
+		$key = self::row_key( $row, $cols );
+		if ( isset( $index['by_key'][ $key ] ) ) {
+			$id   = $index['by_key'][ $key ];
+			$has  = $index['by_id'][ $id ]['code'];
+			if ( '' === $code || '' === $has || $has === $code ) {
+				return $id;
+			}
+		}
+		return 0;
 	}
 
 	private static function cell( array $row, $idx ) {
@@ -205,24 +300,32 @@ final class BVWL_Wine_List {
 		global $wpdb;
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT p.ID, p.post_status, k.meta_value AS k, s.meta_value AS ss
+				"SELECT p.ID, p.post_status, k.meta_value AS k, s.meta_value AS ss, c.meta_value AS c
 				   FROM {$wpdb->posts} p
 				   LEFT JOIN {$wpdb->postmeta} k ON k.post_id = p.ID AND k.meta_key = %s
 				   LEFT JOIN {$wpdb->postmeta} s ON s.post_id = p.ID AND s.meta_key = '_stock_status'
+				   LEFT JOIN {$wpdb->postmeta} c ON c.post_id = p.ID AND c.meta_key = %s
 				  WHERE p.post_type = 'product' AND p.post_status IN ('publish','private','draft','pending')
 				  ORDER BY p.ID ASC",
-				self::KEY_META
+				self::KEY_META,
+				self::CODE_META
 			)
 		);
-		$by_id  = array();
-		$by_key = array();
+		$by_id   = array();
+		$by_key  = array();
+		$by_code = array();
 		foreach ( $rows as $r ) {
-			$id = (int) $r->ID;
+			$id   = (int) $r->ID;
+			$code = self::code_id( (string) $r->c );
 			$by_id[ $id ] = array(
 				'status' => $r->post_status,
 				'stock'  => (string) $r->ss,
 				'key'    => (string) $r->k,
+				'code'   => $code,
 			);
+			if ( '' !== $code && ( ! isset( $by_code[ $code ] ) || ( 'publish' === $r->post_status && 'publish' !== $by_id[ $by_code[ $code ] ]['status'] ) ) ) {
+				$by_code[ $code ] = $id;
+			}
 			// Published wins over a hidden one with the same key; otherwise the oldest.
 			if ( '' !== (string) $r->k ) {
 				if ( ! isset( $by_key[ $r->k ] ) || ( 'publish' === $r->post_status && 'publish' !== $by_id[ $by_key[ $r->k ] ]['status'] ) ) {
@@ -230,7 +333,7 @@ final class BVWL_Wine_List {
 				}
 			}
 		}
-		$this->product_index = array( 'by_id' => $by_id, 'by_key' => $by_key );
+		$this->product_index = array( 'by_id' => $by_id, 'by_key' => $by_key, 'by_code' => $by_code );
 		return $this->product_index;
 	}
 
@@ -320,9 +423,9 @@ final class BVWL_Wine_List {
 						$pid = isset( $meta[ $key ]['prodcut_id'] ) ? (int) $meta[ $key ]['prodcut_id'] : 0;
 
 						if ( $cols && false !== $cols['wine'] && isset( $raw[ $key ] ) && is_array( $raw[ $key ] ) ) {
-							$k = self::row_key( $raw[ $key ], $cols );
-							if ( isset( $index['by_key'][ $k ] ) && 'publish' === $index['by_id'][ $index['by_key'][ $k ] ]['status'] ) {
-								$pid = $index['by_key'][ $k ];
+							$found = self::resolve_row( $raw[ $key ], $cols, $index );
+							if ( $found && 'publish' === $index['by_id'][ $found ]['status'] ) {
+								$pid = $found;
 							}
 						}
 
@@ -871,30 +974,58 @@ final class BVWL_Wine_List {
 				'qty'         => trim( self::cell( $row, $cols['qty'] ) ),
 				'unit'        => trim( self::cell( $row, $cols['unit'] ) ),
 				'status'      => trim( self::cell( $row, $cols['status'] ) ),
+				'code'        => self::row_code( $row, $cols ),
 			);
-			$key = self::row_key( $row, $cols );
+			$key      = self::row_key( $row, $cols );
+			$identity = '' !== $info['code'] ? '#' . self::code_id( $info['code'] ) : $key;
 
 			$product_id = 0;
 			if ( '' === $info['title'] || '' === $info['price'] ) {
 				$report['skipped']++;
-			} elseif ( isset( $seen[ $key ] ) ) {
+			} elseif ( isset( $seen[ $identity ] ) ) {
 				// The same wine twice on one sheet: both rows sell the one product.
-				$product_id = $seen[ $key ];
+				$product_id = $seen[ $identity ];
 				$report['duplicates'][] = $info['title'] . ( '' !== $info['note'] ? ' ' . $info['note'] : '' );
-			} elseif ( isset( $index['by_key'][ $key ] ) ) {
-				$product_id = $index['by_key'][ $key ];
+			} elseif ( $found = self::resolve_row( $row, $cols, $index ) ) {
+				$product_id = $found;
 				$this->update_product( $product_id, $info ) ? $report['updated']++ : $report['unchanged']++;
 			} else {
 				$product_id = $this->create_product( $info );
 				if ( $product_id ) {
-					update_post_meta( $product_id, self::KEY_META, $key );
 					$report['created']++;
 				}
 			}
 
 			if ( $product_id ) {
-				$seen[ $key ] = $product_id;
+				$seen[ $identity ] = $product_id;
 				$this->set_listed_in( $product_id, $table, true );
+				// Keep both identities current: the name key follows a corrected
+				// spelling, and a code arriving for the first time is attached.
+				if ( get_post_meta( $product_id, self::KEY_META, true ) !== $key ) {
+					update_post_meta( $product_id, self::KEY_META, $key );
+				}
+				if ( '' !== $info['code'] && self::code_id( get_post_meta( $product_id, self::CODE_META, true ) ) !== self::code_id( $info['code'] ) ) {
+					update_post_meta( $product_id, self::CODE_META, $info['code'] );
+					$report['codes'] = ( isset( $report['codes'] ) ? $report['codes'] : 0 ) + 1;
+				}
+				if ( '' !== $info['code'] ) {
+					$this->set_sku( $product_id, $info['code'] );
+				}
+				// Teach this import's index what it just learned, so a later row
+				// with the same name but a different code is not matched to it.
+				$cid = self::code_id( $info['code'] );
+				$index['by_id'][ $product_id ] = array(
+					'status' => isset( $index['by_id'][ $product_id ] ) ? $index['by_id'][ $product_id ]['status'] : 'publish',
+					'stock'  => isset( $index['by_id'][ $product_id ] ) ? $index['by_id'][ $product_id ]['stock'] : 'instock',
+					'key'    => $key,
+					'code'   => '' !== $cid ? $cid : ( isset( $index['by_id'][ $product_id ] ) ? $index['by_id'][ $product_id ]['code'] : '' ),
+				);
+				if ( ! isset( $index['by_key'][ $key ] ) ) {
+					$index['by_key'][ $key ] = $product_id;
+				}
+				if ( '' !== $cid ) {
+					$index['by_code'][ $cid ] = $product_id;
+				}
 			}
 
 			$map[ $i ] = array(
@@ -921,6 +1052,7 @@ final class BVWL_Wine_List {
 
 		$this->product_index( true );
 		$this->schedule_table_cache_flush();
+		$report['sku_clashes'] = $this->sku_clashes;
 		$report['time'] = time();
 		update_option( 'bvwl_last_import_' . $table, $report, false );
 		if ( get_current_user_id() ) {
@@ -972,6 +1104,23 @@ final class BVWL_Wine_List {
 		update_post_meta( $product_id, self::UNIT_META, $info['unit'] );
 		update_post_meta( $product_id, self::STATUS_META, $info['status'] );
 	}
+
+	/** SKU must be unique in WooCommerce; a clash is reported, never fatal. */
+	private function set_sku( $product_id, $code ) {
+		$p = wc_get_product( $product_id );
+		if ( ! $p || (string) $p->get_sku( 'edit' ) === (string) $code ) {
+			return;
+		}
+		try {
+			$p->set_sku( $code );
+			$p->save();
+		} catch ( Exception $e ) {
+			$this->sku_clashes[] = $code;
+		}
+	}
+
+	/** @var string[] codes WooCommerce refused as SKUs during this import */
+	private $sku_clashes = array();
 
 	private static function same_text( $a, $b ) {
 		$d = function ( $s ) {
@@ -1179,6 +1328,12 @@ final class BVWL_Wine_List {
 			sprintf( '%d no longer listed (now out of stock, pages kept)', $r['retired'] ),
 		);
 		echo '<div class="notice notice-success is-dismissible"><p><strong>Wine list products updated</strong> from &ldquo;' . esc_html( $r['title'] ) . '&rdquo; (' . (int) $r['rows'] . ' rows): ' . esc_html( implode( ', ', $parts ) ) . '.</p>';
+		if ( ! empty( $r['codes'] ) ) {
+			echo '<p>Product codes attached for the first time: ' . (int) $r['codes'] . '.</p>';
+		}
+		if ( ! empty( $r['sku_clashes'] ) ) {
+			echo '<p>These codes are already used by another product, so they could not be saved as its SKU: ' . esc_html( implode( ', ', array_slice( $r['sku_clashes'], 0, 10 ) ) ) . '</p>';
+		}
 		if ( $r['skipped'] ) {
 			echo '<p>' . (int) $r['skipped'] . ' row(s) had no wine name or no price and were skipped.</p>';
 		}
