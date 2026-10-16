@@ -34,7 +34,7 @@ final class BVWL_Wine_List {
 	const ADOPTED_OPTION = 'bvwl_adopted_existing';
 
 	/** Headings the product-code column may have. Matched case-insensitively. */
-	const CODE_HEADERS = array( 'Code', 'Product Code', 'Stock Code', 'Item Code', 'Wine Code', 'SKU', 'Ref', 'Reference' );
+	const CODE_HEADERS = array( 'PRD_CODE', 'PRD CODE', 'Code', 'Product Code', 'Stock Code', 'Item Code', 'Wine Code', 'SKU', 'Ref', 'Reference' );
 
 	/** @var array<int,array> cached row->product maps, keyed by TablePress table id */
 	private $row_products_cache = array();

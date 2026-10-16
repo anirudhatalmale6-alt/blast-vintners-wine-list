@@ -274,7 +274,7 @@ orders by name.
 ## Product codes (1.1.0, same day)
 
 Joe's back office gives every product a unique 8-digit code; he used to strip it
-before importing. With a code column on the sheet (heading `Code`, `Product Code`,
+before importing. With a code column on the sheet (heading `PRD_CODE` — what his stock software exports —, `Code`, `Product Code`,
 `Stock Code`, `Item Code`, `Wine Code`, `SKU`, `Ref` or `Reference`, any position):
 
 - rows match on the code first (`_bvwl_code`, leading zeros ignored since Excel drops
