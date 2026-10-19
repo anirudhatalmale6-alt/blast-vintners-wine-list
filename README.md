@@ -292,3 +292,29 @@ Description reappears and **"Inc Duty & Vat" (the price) disappears** — proven
 staging. So on any table WITH a code column, visibility is set by heading via
 `tablepress_table_raw_render_data`: Code + Description hidden, everything else
 shown. Tables without a code column are untouched.
+
+## 1.2.0 — one Full List, filtered views (19 Oct 2026)
+
+Joe's idea: import only the Full List; the Transit and single-producer pages show
+filtered views of it — `[table id=39 filter="Guy Breton" /]` via the TablePress Row
+Filter extension (already installed, v1.3). One list, one stock count, nothing to
+keep in sync.
+
+🔴 **The Row Filter deletes non-matching rows and renumbers the rest** at
+`tablepress_table_raw_render_data` (prio 10). The Buy column mapped rendered row N
+to stored row N, so on a filtered table every button sold the wrong wine — proven
+on live with 1.1.0: filter "Guy Breton" → buttons for Pinot Noir Schueller,
+Pinot Noir W Schueller, Alsace Singulier Sec. `remember_row_origins()` (prio 99)
+walks the surviving rows against the stored ones (an in-order subset, cells
+untouched) and records where each came from; `get_row_products()` translates
+back, cache keyed per filter. If rows cannot be lined up, NO Buy buttons rather
+than wrong ones. Verified on live across 17 filters: every button = its row's wine.
+
+🔴 **Deploying a fix is not enough while TablePress serves cached HTML.** The first
+re-test after deploying still showed the wrong buttons — served from the day-long
+cache the pre-fix test had populated. 1.2.0 flushes every table cache whenever the
+plugin version changes (`bvwl_version`).
+
+Filters match **anywhere in the row**, hidden columns included (so a tag in
+Description works) — "Smith" also matched a wine whose description mentions a
+Smith; use specific terms ("Smith Hayne").

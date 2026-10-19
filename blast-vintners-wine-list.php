@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blast Vintners Wine List
  * Description: The bespoke wine-list storefront: the Buy column and expandable descriptions on TablePress tables, the add-to-cart endpoint behind them, and the spreadsheet-import-to-WooCommerce-product step. Previously this code lived inside the TablePress plugin's own source files and inside the X theme's functions.php, which meant updating either one destroyed it. It now lives here, on documented hooks only.
- * Version: 1.1.0
+ * Version: 1.2.0
  * Author: Anirudha Talmale
  * Requires PHP: 7.4
  *
@@ -18,6 +18,7 @@ if ( ! class_exists( 'BVWL_Wine_List' ) ) :
 final class BVWL_Wine_List {
 
 	const META_KEY = '_table_press_woo_products';
+	const VERSION  = '1.2.0';
 
 	/*
 	 * Since 1.1.0 a product is identified by what the spreadsheet row says it is
@@ -38,6 +39,9 @@ final class BVWL_Wine_List {
 
 	/** @var array<int,array> cached row->product maps, keyed by TablePress table id */
 	private $row_products_cache = array();
+
+	/** @var array<string,array<int,int>> per table: rendered row index => row index in the stored table */
+	private $row_origin = array();
 
 	/** @var array|null per-request product index, see product_index() */
 	private $product_index = null;
@@ -80,6 +84,12 @@ final class BVWL_Wine_List {
 		add_action( 'woocommerce_product_set_stock_status', array( $this, 'schedule_table_cache_flush' ) );
 		add_action( 'shutdown', array( $this, 'maybe_flush_table_caches' ) );
 
+		// A new version of this plugin can change what a table renders to, but
+		// TablePress would keep serving yesterday's HTML to visitors for up to a
+		// day. Proven the hard way: a fixed Buy-button mapping went live and the
+		// cached, wrong one kept being served. So a version change flushes.
+		add_action( 'init', array( $this, 'flush_on_version_change' ) );
+
 		// --- single product page: vintage + description, search snippet ----
 		add_action( 'woocommerce_single_product_summary', array( $this, 'product_page_details' ), 25 );
 		add_filter( 'wpseo_title', array( $this, 'seo_title' ) );
@@ -89,6 +99,7 @@ final class BVWL_Wine_List {
 
 		// --- the product code: matched on, never shown to customers --------
 		add_filter( 'tablepress_table_raw_render_data', array( $this, 'hide_code_column' ), 10, 2 );
+		add_filter( 'tablepress_table_raw_render_data', array( $this, 'remember_row_origins' ), 99, 2 );
 		add_filter( 'wc_product_sku_enabled', array( $this, 'sku_only_behind_the_scenes' ) );
 		add_filter( 'woocommerce_structured_data_product', array( $this, 'structured_data_without_code' ), 10, 2 );
 	}
@@ -117,6 +128,45 @@ final class BVWL_Wine_List {
 		foreach ( $header as $idx => $label ) {
 			$table['visibility']['columns'][ $idx ] = ( false === self::find_col( array( $label ), $hide ) ) ? 1 : 0;
 		}
+		return $table;
+	}
+
+	/**
+	 * One Full List, many views: [table id=39 filter="Guy Breton"] shows only the
+	 * matching rows (TablePress Row Filter extension). That extension DELETES the
+	 * non-matching rows and renumbers the rest before rendering, so "row 5" of a
+	 * filtered table is not row 5 of the stored one -- and every Buy button would
+	 * be wired to the wrong wine. Record where each surviving row came from.
+	 *
+	 * The surviving rows are an in-order subset of the stored rows with their
+	 * cells untouched, so walking both lists side by side recovers the mapping.
+	 */
+	public function remember_row_origins( $table, $render_options ) {
+		$table_id = isset( $table['id'] ) ? (string) $table['id'] : '';
+		unset( $this->row_origin[ $table_id ] );
+		if ( '' === $table_id || empty( $table['data'] ) ) {
+			return $table;
+		}
+		$post_id = $this->table_id_to_post_id( $table_id );
+		$stored  = $post_id ? json_decode( get_post( $post_id )->post_content, true ) : null;
+		if ( ! is_array( $stored ) || count( $stored ) === count( $table['data'] ) ) {
+			return $table; // nothing removed: row N is row N
+		}
+		$map = array();
+		$j   = 0;
+		$n   = count( $stored );
+		foreach ( $table['data'] as $i => $row ) {
+			while ( $j < $n && $stored[ $j ] != $row ) { // loose: same cells, ints vs strings tolerated
+				$j++;
+			}
+			if ( $j >= $n ) {
+				$this->row_origin[ $table_id ] = array(); // could not line up: safer to offer no Buy buttons than wrong ones
+				return $table;
+			}
+			$map[ $i ] = $j;
+			$j++;
+		}
+		$this->row_origin[ $table_id ] = $map;
 		return $table;
 	}
 
@@ -171,6 +221,13 @@ final class BVWL_Wine_List {
 	 * ===================================================================== */
 
 	private $flush_tables = false;
+
+	public function flush_on_version_change() {
+		if ( get_option( 'bvwl_version' ) !== self::VERSION ) {
+			update_option( 'bvwl_version', self::VERSION, false );
+			$this->schedule_table_cache_flush();
+		}
+	}
 
 	public function schedule_table_cache_flush() {
 		$this->flush_tables = true;
@@ -388,8 +445,13 @@ final class BVWL_Wine_List {
 		if ( '' === $table_id || ! class_exists( 'woocommerce' ) ) {
 			return array();
 		}
-		if ( isset( $this->row_products_cache[ $table_id ] ) ) {
-			return $this->row_products_cache[ $table_id ];
+		$origin    = isset( $this->row_origin[ (string) $table_id ] ) ? $this->row_origin[ (string) $table_id ] : null;
+		$cache_key = $table_id . '|' . ( null === $origin ? '' : md5( wp_json_encode( $origin ) ) );
+		if ( isset( $this->row_products_cache[ $cache_key ] ) ) {
+			return $this->row_products_cache[ $cache_key ];
+		}
+		if ( array() === $origin ) {
+			return array(); // a filtered table whose rows could not be traced back
 		}
 
 		$post_id = $this->table_id_to_post_id( $table_id );
@@ -418,7 +480,9 @@ final class BVWL_Wine_List {
 				$index = $this->product_index();
 
 				$n = 0;
-				foreach ( $table['visibility']['rows'] as $key => $visible ) {
+				foreach ( $table['visibility']['rows'] as $shown => $visible ) {
+					// On a filtered table, translate back to the stored row.
+					$key = ( null !== $origin && isset( $origin[ $shown ] ) ) ? $origin[ $shown ] : $shown;
 					if ( $key > 0 && $visible ) {
 						$pid = isset( $meta[ $key ]['prodcut_id'] ) ? (int) $meta[ $key ]['prodcut_id'] : 0;
 
@@ -447,7 +511,7 @@ final class BVWL_Wine_List {
 			}
 		}
 
-		$this->row_products_cache[ $table_id ] = $row_products;
+		$this->row_products_cache[ $cache_key ] = $row_products;
 		return $row_products;
 	}
 
