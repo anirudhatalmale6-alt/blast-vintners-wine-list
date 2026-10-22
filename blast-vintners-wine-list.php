@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blast Vintners Wine List
  * Description: The bespoke wine-list storefront: the Buy column and expandable descriptions on TablePress tables, the add-to-cart endpoint behind them, and the spreadsheet-import-to-WooCommerce-product step. Previously this code lived inside the TablePress plugin's own source files and inside the X theme's functions.php, which meant updating either one destroyed it. It now lives here, on documented hooks only.
- * Version: 1.3.0
+ * Version: 1.3.1
  * Author: Anirudha Talmale
  * Requires PHP: 7.4
  *
@@ -18,7 +18,7 @@ if ( ! class_exists( 'BVWL_Wine_List' ) ) :
 final class BVWL_Wine_List {
 
 	const META_KEY = '_table_press_woo_products';
-	const VERSION  = '1.3.0';
+	const VERSION  = '1.3.1';
 
 	/*
 	 * Since 1.1.0 a product is identified by what the spreadsheet row says it is
@@ -840,6 +840,19 @@ final class BVWL_Wine_List {
     .tbpwoodesc{float: right; text-align: right;}
     .bvwl-soldout{color:#999;font-size:12px;white-space:nowrap;}
     .bvwl-added{color:#4a7a3a;font-size:12px;white-space:nowrap;}
+    /* WooCommerce's default purple (#7f54b3) on "Proceed to checkout" and
+       "Place order" -> black, to match the site and the Add to basket button. */
+    .woocommerce a.button.alt, .woocommerce button.button.alt, .woocommerce input.button.alt, .woocommerce #respond input#submit.alt,
+    .woocommerce-page a.button.alt, .woocommerce-page button.button.alt {
+      background-color:#000 !important; color:#fff !important; border-color:#000 !important; border-radius:0 !important;
+      text-transform:uppercase; letter-spacing:.12em; font-size:13px !important; }
+    .woocommerce a.button.alt:hover, .woocommerce button.button.alt:hover, .woocommerce input.button.alt:hover,
+    .woocommerce-page a.button.alt:hover, .woocommerce-page button.button.alt:hover { background-color:#333 !important; border-color:#333 !important; }
+    .woocommerce button.button.alt:disabled, .woocommerce button.button.alt.disabled { background-color:#777 !important; border-color:#777 !important; }
+    /* ...and the lilac-tinted payment panel at checkout -> neutral grey. */
+    .woocommerce-checkout #payment { background:#f4f4f4 !important; }
+    .woocommerce-checkout #payment div.payment_box { background-color:#e8e8e8 !important; }
+    .woocommerce-checkout #payment div.payment_box::before { border-bottom-color:#e8e8e8 !important; }
     #bvwl-toast{position:fixed;right:24px;bottom:24px;z-index:99999;display:flex;align-items:center;gap:16px;max-width:420px;padding:16px 18px;background:#111;color:#fff;font-size:14px;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,.25);transform:translateY(20px);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;}
     #bvwl-toast.is-on{opacity:1;transform:none;pointer-events:auto;}
     #bvwl-toast.is-err{background:#7a1f1f;}
