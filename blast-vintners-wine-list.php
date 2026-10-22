@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blast Vintners Wine List
  * Description: The bespoke wine-list storefront: the Buy column and expandable descriptions on TablePress tables, the add-to-cart endpoint behind them, and the spreadsheet-import-to-WooCommerce-product step. Previously this code lived inside the TablePress plugin's own source files and inside the X theme's functions.php, which meant updating either one destroyed it. It now lives here, on documented hooks only.
- * Version: 1.3.1
+ * Version: 1.3.2
  * Author: Anirudha Talmale
  * Requires PHP: 7.4
  *
@@ -18,7 +18,7 @@ if ( ! class_exists( 'BVWL_Wine_List' ) ) :
 final class BVWL_Wine_List {
 
 	const META_KEY = '_table_press_woo_products';
-	const VERSION  = '1.3.1';
+	const VERSION  = '1.3.2';
 
 	/*
 	 * Since 1.1.0 a product is identified by what the spreadsheet row says it is
@@ -94,6 +94,10 @@ final class BVWL_Wine_List {
 		add_action( 'woocommerce_single_product_summary', array( $this, 'product_page_details' ), 25 );
 		add_action( 'wp', array( $this, 'product_layout_setup' ) );
 		add_action( 'template_redirect', array( $this, 'render_region_page' ), 20 );
+		add_filter( 'woocommerce_get_item_data', array( $this, 'cart_item_format' ), 10, 2 );
+		// The site says "basket" everywhere else.
+		add_filter( 'wc_add_to_cart_message_html', function ( $m ) { return str_replace( array( 'your cart', 'to cart' ), array( 'your basket', 'to basket' ), $m ); } );
+		add_filter( 'wc_empty_cart_message', function () { return 'Your basket is currently empty.'; } );
 		add_filter( 'wpseo_title', array( $this, 'seo_title' ) );
 		add_filter( 'wpseo_title', array( $this, 'region_seo_title' ) );
 		add_filter( 'wpseo_metadesc', array( $this, 'region_seo_description' ) );
@@ -814,8 +818,33 @@ final class BVWL_Wine_List {
 
       }
 
+      <?php if ( 'v2' === get_option( 'bvwl_add_feedback' ) ) : ?>
+      /* WooCommerce's own success notices ("... removed. Undo?", "Cart
+         updated.") arrive as a box with a coloured line across the page. Show
+         them in the same corner box as the wine list instead -- the Undo link
+         comes too. Only SUCCESS notices: errors and info (e.g. checkout field
+         errors, "Returning customer?") stay where they are, on purpose. */
+      jQuery(function($){
+        function bvwlGrabNotices() {
+          $( '.woocommerce-notices-wrapper .woocommerce-message, .woocommerce > .woocommerce-message' ).each(function(){
+            var $n = $( this );
+            if ( $n.data( 'bvwl' ) ) { return; }
+            $n.data( 'bvwl', 1 );
+            var $c = $n.clone();
+            $c.find( 'a.button, .button, .wc-forward' ).remove();
+            var txt = $.trim( $c.text() );
+            var title = /removed/i.test( txt ) ? 'Removed from your basket' : ( /restored/i.test( txt ) ? 'Back in your basket' : ( /added/i.test( txt ) ? 'Added to your basket' : ( /updated/i.test( txt ) ? 'Basket updated' : 'Done' ) ) );
+            $n.hide();
+            bvwlToast( 'ok', title, $.trim( $c.html() ), true );
+          });
+        }
+        bvwlGrabNotices();
+        if ( window.MutationObserver ) { new MutationObserver( bvwlGrabNotices ).observe( document.body, { childList: true, subtree: true } ); }
+      });
+      <?php endif; ?>
+
       var bvwlToastTimer = null;
-      function bvwlToast( kind, title, body ) {
+      function bvwlToast( kind, title, body, isHtml ) {
         var $t = jQuery( '#bvwl-toast' );
         if ( ! $t.length ) {
           $t = jQuery( '<div id="bvwl-toast" role="status" aria-live="polite"><div class="bvwl-toast-text"><strong></strong><span></span></div><a class="bvwl-toast-cart" href="<?php echo esc_url( function_exists( 'wc_get_cart_url' ) ? wc_get_cart_url() : home_url( '/cart/' ) ); ?>">View basket</a><button type="button" class="bvwl-toast-x" aria-label="Close">&times;</button></div>' ).appendTo( 'body' );
@@ -823,8 +852,9 @@ final class BVWL_Wine_List {
         }
         $t.toggleClass( 'is-err', 'err' === kind );
         $t.find( 'strong' ).text( title );
-        $t.find( '.bvwl-toast-text span' ).text( body );
-        $t.find( '.bvwl-toast-cart' ).toggle( 'err' !== kind );
+        if ( isHtml ) { $t.find( '.bvwl-toast-text span' ).html( body ); } else { $t.find( '.bvwl-toast-text span' ).text( body ); }
+        var onCart = <?php echo wp_json_encode( function_exists( 'wc_get_cart_url' ) ? untrailingslashit( wc_get_cart_url() ) : '' ); ?> === window.location.href.split( /[?#]/ )[0].replace( /\/$/, '' );
+        $t.find( '.bvwl-toast-cart' ).toggle( 'err' !== kind && ! onCart );
         $t.addClass( 'is-on' );
         clearTimeout( bvwlToastTimer );
         bvwlToastTimer = setTimeout( function(){ $t.removeClass( 'is-on' ); }, 6000 );
@@ -863,6 +893,15 @@ final class BVWL_Wine_List {
     #bvwl-toast .bvwl-toast-cart:hover{background:#fff;color:#111;}
     #bvwl-toast .bvwl-toast-x{background:none;border:0;color:#aaa;font-size:20px;line-height:1;cursor:pointer;padding:0 0 0 4px;}
     @media (max-width:600px){#bvwl-toast{left:12px;right:12px;bottom:12px;max-width:none;}}
+    #bvwl-toast .bvwl-toast-text span a{color:#fff;text-decoration:underline;margin-left:4px;}
+    /* The notices that stay on the page (errors, info): no coloured line across
+       the top, no WooCommerce icon -- a plain panel with a thin rule on the left. */
+    .woocommerce-message, .woocommerce-info, .woocommerce-error, .woocommerce-noreviews, p.no-comments {
+      border-top:0 !important; border-left:3px solid #000 !important; background:#f5f5f5 !important; color:#222 !important; padding:14px 18px !important; }
+    .woocommerce-error { border-left-color:#a33 !important; }
+    .woocommerce-message::before, .woocommerce-info::before, .woocommerce-error::before { display:none !important; }
+    .bvwl-secure { clear:both; margin:20px 0 0; font-size:13px; color:#555; display:flex; align-items:center; gap:8px; }
+    .bvwl-secure::before { content:""; width:14px; height:16px; flex:none; background:no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 14 16'%3E%3Cpath d='M3 7V5a4 4 0 0 1 8 0v2' fill='none' stroke='%23555' stroke-width='1.6'/%3E%3Crect x='1' y='7' width='12' height='9' rx='1' fill='%23555'/%3E%3C/svg%3E"); }
     .bvwl-product-details{margin:0 0 1.5em;}
     .bvwl-product-details .bvwl-facts{margin:0 0 .75em;}
     .tablepress tbody td{cursor: pointer !important;}
@@ -1773,6 +1812,23 @@ final class BVWL_Wine_List {
 	 * filtered to the region instead -- the table customers already know, Buy
 	 * buttons and all.
 	 * ===================================================================== */
+
+	/**
+	 * Basket and checkout: under a case wine's name, say it's a case. Display
+	 * only -- nothing is added to the order itself, because Joe's back office
+	 * reads order lines by product name and the order emails must not change.
+	 */
+	public function cart_item_format( $data, $item ) {
+		$pid = isset( $item['product_id'] ) ? (int) $item['product_id'] : 0;
+		if ( $pid && self::unit_of( $pid ) > 1 ) {
+			$name   = get_the_title( $pid );
+			$data[] = array(
+				'key'   => 'Format',
+				'value' => self::format_label( html_entity_decode( $name ), self::unit_of( $pid ) ),
+			);
+		}
+		return $data;
+	}
 
 	const FULL_LIST_TABLE = '39';
 
