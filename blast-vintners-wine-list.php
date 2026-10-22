@@ -92,6 +92,7 @@ final class BVWL_Wine_List {
 
 		// --- single product page: vintage + description, search snippet ----
 		add_action( 'woocommerce_single_product_summary', array( $this, 'product_page_details' ), 25 );
+		add_action( 'wp', array( $this, 'product_layout_setup' ) );
 		add_filter( 'wpseo_title', array( $this, 'seo_title' ) );
 		add_filter( 'wpseo_metadesc', array( $this, 'seo_description' ) );
 		add_filter( 'wpseo_opengraph_desc', array( $this, 'seo_description' ) );
@@ -1460,6 +1461,223 @@ final class BVWL_Wine_List {
 		}
 		echo '</div>';
 	}
+
+	/* =====================================================================
+	 * Product page layout v2 (behind the `bvwl_product_layout` option)
+	 *
+	 * The stock WooCommerce product page on this theme is a single column of
+	 * defaults: purple button, no unit pricing, a bare category link. This
+	 * replaces the summary with a two-column layout -- the wine on the left,
+	 * a purchase card on the right -- plus "more from this region" below.
+	 * Switched on per site with update_option( 'bvwl_product_layout', 'v2' ),
+	 * so it can be shipped dormant and turned on once approved.
+	 * ===================================================================== */
+
+	public function product_layout_setup() {
+		if ( 'v2' !== get_option( 'bvwl_product_layout' ) || ! function_exists( 'is_product' ) || ! is_product() ) {
+			return;
+		}
+		foreach ( array(
+			array( 'woocommerce_template_single_title', 5 ),
+			array( 'woocommerce_template_single_rating', 10 ),
+			array( 'woocommerce_template_single_price', 10 ),
+			array( 'woocommerce_template_single_excerpt', 20 ),
+			array( 'woocommerce_template_single_add_to_cart', 30 ),
+			array( 'woocommerce_template_single_meta', 40 ),
+			array( 'woocommerce_template_single_sharing', 50 ),
+		) as $a ) {
+			remove_action( 'woocommerce_single_product_summary', $a[0], $a[1] );
+		}
+		remove_action( 'woocommerce_single_product_summary', array( $this, 'product_page_details' ), 25 );
+		add_action( 'woocommerce_single_product_summary', array( $this, 'product_layout_v2' ), 5 );
+		add_action( 'woocommerce_after_single_product_summary', array( $this, 'product_more_from_region' ), 30 );
+		add_action( 'wp_head', array( $this, 'product_layout_css' ), 99 );
+		add_filter( 'body_class', function ( $c ) { $c[] = 'bvwl-pp-v2'; return $c; } );
+		add_filter( 'woocommerce_product_single_add_to_cart_text', function () { return 'Add to basket'; } );
+	}
+
+	/** "Sold in 12s" products are priced and stocked per case. */
+	private static function unit_of( $product_id ) {
+		$u = (string) get_post_meta( $product_id, self::UNIT_META, true );
+		return ( is_numeric( $u ) && (int) $u > 1 ) ? (int) $u : 1;
+	}
+
+	private static function format_label( $name, $unit ) {
+		if ( preg_match( '/\((magnum|half|halves|double magnum|jeroboam|[0-9.]+\s?cl)\)/i', $name, $m ) ) {
+			$size = ucfirst( strtolower( $m[1] ) );
+		} else {
+			$size = '75cl';
+		}
+		return $unit > 1 ? sprintf( 'Case of %d × %s', $unit, $size ) : sprintf( 'Bottle, %s', $size );
+	}
+
+	public function product_layout_v2() {
+		global $product;
+		if ( ! $product instanceof WC_Product ) {
+			return;
+		}
+		$id = $product->get_id();
+		list( $vintage, , $status ) = self::wine_facts( $id );
+		$unit   = self::unit_of( $id );
+		$name   = $product->get_name();
+		$cats   = wp_get_post_terms( $id, 'product_cat' );
+		$region = ( $cats && ! is_wp_error( $cats ) ) ? $cats[0] : null;
+		$price  = (float) $product->get_price();
+		$desc   = trim( (string) $product->get_description() );
+		$stock  = $product->get_stock_quantity();
+		$status_label = 'IB' === $status ? 'In Bond' : ( 'DP' === $status ? 'Duty Paid' : '' );
+		$status_note  = 'IB' === $status ? 'Held in a bonded warehouse.' : ( 'DP' === $status ? 'Duty and VAT paid, ready for delivery.' : '' );
+
+		echo '<div class="bvwl-pp">';
+
+		// --- breadcrumb ---------------------------------------------------
+		echo '<nav class="bvwl-pp-crumbs"><a href="' . esc_url( home_url( '/list/' ) ) . '">Full List</a>';
+		if ( $region ) {
+			echo ' <span>/</span> <a href="' . esc_url( get_term_link( $region ) ) . '">' . esc_html( $region->name ) . '</a>';
+		}
+		echo '</nav>';
+
+		echo '<div class="bvwl-pp-grid">';
+
+		// --- left: the wine (heading and body are separate grid areas so that
+		//     on a phone the purchase card can sit between them) ------------
+		echo '<div class="bvwl-pp-head">';
+		$eyebrow = array_filter( array( $region ? $region->name : '', $vintage ) );
+		if ( $eyebrow ) {
+			echo '<p class="bvwl-pp-eyebrow">' . esc_html( implode( ' · ', $eyebrow ) ) . '</p>';
+		}
+		echo '<h1 class="bvwl-pp-title product_title entry-title">' . esc_html( $name ) . '</h1>';
+		echo '</div>';
+		echo '<div class="bvwl-pp-main">';
+		if ( '' !== $desc ) {
+			echo '<div class="bvwl-pp-desc">' . wpautop( wp_kses_post( $desc ) ) . '</div>';
+		}
+		echo '<dl class="bvwl-pp-facts">';
+		if ( $region ) {
+			echo '<dt>Region</dt><dd>' . esc_html( $region->name ) . '</dd>';
+		}
+		if ( '' !== $vintage ) {
+			echo '<dt>Vintage</dt><dd>' . esc_html( $vintage ) . '</dd>';
+		}
+		echo '<dt>Format</dt><dd>' . esc_html( self::format_label( $name, $unit ) ) . '</dd>';
+		if ( $status_label ) {
+			echo '<dt>Status</dt><dd>' . esc_html( $status_label ) . ' <span class="bvwl-pp-note">' . esc_html( $status_note ) . '</span></dd>';
+		}
+		echo '</dl>';
+		echo '</div>';
+
+		// --- right: the purchase card ---------------------------------------
+		echo '<aside class="bvwl-pp-buy">';
+		echo '<p class="bvwl-pp-price">' . wc_price( $price ) . '</p>';
+		if ( $unit > 1 ) {
+			echo '<p class="bvwl-pp-per">per case of ' . (int) $unit . ' &middot; ' . wc_price( $price / $unit ) . ' a bottle</p>';
+		} else {
+			echo '<p class="bvwl-pp-per">per bottle</p>';
+		}
+		echo '<p class="bvwl-pp-inc">Including duty &amp; VAT</p>';
+		if ( $product->is_in_stock() ) {
+			if ( null !== $stock ) {
+				$what = $unit > 1 ? _n( 'case', 'cases', $stock ) : _n( 'bottle', 'bottles', $stock );
+				echo '<p class="bvwl-pp-stock">' . (int) $stock . ' ' . esc_html( $what ) . ' available</p>';
+			}
+			woocommerce_template_single_add_to_cart();
+		} else {
+			echo '<p class="bvwl-pp-stock bvwl-pp-out">Sold out</p>';
+			echo '<p class="bvwl-pp-note">Get in touch and we\'ll let you know if more becomes available.</p>';
+		}
+		echo '</aside>';
+
+		echo '</div></div>';
+	}
+
+	/** A few in-stock wines from the same region, so a visitor from Google has somewhere to go next. */
+	public function product_more_from_region() {
+		global $product;
+		if ( ! $product instanceof WC_Product ) {
+			return;
+		}
+		$cats = wp_get_post_terms( $product->get_id(), 'product_cat' );
+		if ( ! $cats || is_wp_error( $cats ) ) {
+			return;
+		}
+		$region = $cats[0];
+		$ids    = wc_get_products(
+			array(
+				'status'       => 'publish',
+				'stock_status' => 'instock',
+				'category'     => array( $region->slug ),
+				'exclude'      => array( $product->get_id() ),
+				'limit'        => 4,
+				'orderby'      => 'rand',
+				'return'       => 'ids',
+			)
+		);
+		if ( ! $ids ) {
+			return;
+		}
+		echo '<section class="bvwl-pp-more"><h2>More from ' . esc_html( $region->name ) . '</h2><ul>';
+		foreach ( $ids as $rid ) {
+			$p = wc_get_product( $rid );
+			list( $v ) = self::wine_facts( $rid );
+			$u = self::unit_of( $rid );
+			echo '<li><a href="' . esc_url( get_permalink( $rid ) ) . '">';
+			echo '<span class="bvwl-pp-more-v">' . esc_html( $v ) . '</span>';
+			echo '<span class="bvwl-pp-more-n">' . esc_html( $p->get_name() ) . '</span>';
+			echo '<span class="bvwl-pp-more-p">' . wc_price( (float) $p->get_price() ) . ( $u > 1 ? ' <small>per case of ' . (int) $u . '</small>' : '' ) . '</span>';
+			echo '</a></li>';
+		}
+		echo '</ul><p class="bvwl-pp-all"><a href="' . esc_url( get_term_link( $region ) ) . '">See all ' . esc_html( $region->name ) . ' &rarr;</a></p></section>';
+	}
+
+	public function product_layout_css() {
+		?>
+<style id="bvwl-pp-css">
+.bvwl-pp-v2 .entry-summary, .bvwl-pp-v2 div.product .summary { width:100% !important; float:none !important; margin:0 !important; }
+.bvwl-pp { max-width:1080px; margin:0 auto; padding:8px 0 24px; }
+.bvwl-pp-crumbs { font-size:13px; letter-spacing:.04em; text-transform:uppercase; color:#888; margin:0 0 28px; }
+.bvwl-pp-crumbs a { color:#666; text-decoration:none; } .bvwl-pp-crumbs a:hover { color:#000; }
+.bvwl-pp-crumbs span { margin:0 6px; color:#bbb; }
+.bvwl-pp-grid { display:grid; grid-template-columns:minmax(0,1fr) 320px; grid-template-areas:"head buy" "main buy"; column-gap:56px; align-items:start; }
+.bvwl-pp-head { grid-area:head; } .bvwl-pp-main { grid-area:main; } .bvwl-pp-buy { grid-area:buy; }
+.bvwl-pp-buy p.stock { display:none; }
+.bvwl-pp-eyebrow { font-size:13px; letter-spacing:.12em; text-transform:uppercase; color:#8a8a2a; margin:0 0 10px; }
+.bvwl-pp-title { font-size:34px !important; line-height:1.2 !important; margin:0 0 22px !important; }
+.bvwl-pp-desc p { font-size:16px; line-height:1.75; color:#333; margin:0 0 16px; }
+.bvwl-pp-facts { display:grid; grid-template-columns:120px 1fr; margin:28px 0 0; border-top:1px solid #e6e6e6; }
+.bvwl-pp-facts dt, .bvwl-pp-facts dd { margin:0; padding:12px 0; border-bottom:1px solid #e6e6e6; font-size:14px; }
+.bvwl-pp-facts dt { color:#888; text-transform:uppercase; letter-spacing:.06em; font-size:12px; padding-top:14px; }
+.bvwl-pp-note { color:#888; font-size:13px; }
+.bvwl-pp-buy { border:1px solid #e6e6e6; padding:28px; position:sticky; top:24px; background:#fff; }
+.bvwl-pp-price { font-size:32px; line-height:1; margin:0 0 6px; color:#000; }
+.bvwl-pp-price .amount { color:#000; }
+.bvwl-pp-per { font-size:14px; color:#555; margin:0 0 2px; } .bvwl-pp-per .amount { color:#555; }
+.bvwl-pp-inc { font-size:12px; color:#999; margin:0 0 20px; }
+.bvwl-pp-stock { font-size:14px; color:#4a7a3a; margin:0 0 14px; } .bvwl-pp-out { color:#a33; }
+.bvwl-pp-buy form.cart { display:flex !important; gap:10px; margin:0 !important; width:100% !important; float:none !important; }
+.bvwl-pp-buy form.cart .single_add_to_cart_button { display:block !important; float:none !important; max-width:none !important; }
+.bvwl-pp-buy form.cart .quantity { margin:0 !important; }
+.bvwl-pp-buy form.cart .quantity input.qty { width:64px; height:46px; text-align:center; border:1px solid #ccc; }
+.bvwl-pp-buy form.cart .single_add_to_cart_button { flex:1; width:100%; margin:0 !important; height:46px; background:#000 !important; color:#fff !important; border:0 !important; border-radius:0 !important; text-transform:uppercase; letter-spacing:.12em; font-size:13px; }
+.bvwl-pp-buy form.cart .single_add_to_cart_button:hover { background:#333 !important; }
+.bvwl-pp-more { max-width:1080px; margin:56px auto 0; padding-top:36px; border-top:1px solid #e6e6e6; clear:both; }
+.bvwl-pp-more h2 { font-size:22px !important; margin:0 0 20px !important; }
+.bvwl-pp-more ul { list-style:none; margin:0; padding:0; display:grid; grid-template-columns:repeat(4,1fr); gap:20px; }
+.bvwl-pp-more li a { display:flex; flex-direction:column; gap:6px; height:100%; padding:18px; border:1px solid #e6e6e6; text-decoration:none; color:#222; }
+.bvwl-pp-more li a:hover { border-color:#000; }
+.bvwl-pp-more-v { font-size:12px; letter-spacing:.1em; color:#8a8a2a; }
+.bvwl-pp-more-n { font-size:15px; line-height:1.4; flex:1; }
+.bvwl-pp-more-p { font-size:15px; color:#000; } .bvwl-pp-more-p small { color:#888; font-size:12px; }
+.bvwl-pp-all { margin:18px 0 0; font-size:14px; } .bvwl-pp-all a { color:#000; }
+@media (max-width:820px) {
+  .bvwl-pp-grid { grid-template-columns:1fr; grid-template-areas:"head" "buy" "main"; row-gap:24px; }
+  .bvwl-pp-buy { position:static; }
+  .bvwl-pp-more ul { grid-template-columns:1fr 1fr; }
+  .bvwl-pp-title { font-size:26px !important; }
+}
+</style>
+		<?php
+	}
+
 
 	/** "Pinot Noir Schueller 2023 - Blast Vintners": people search with the vintage. */
 	public function seo_title( $title ) {
