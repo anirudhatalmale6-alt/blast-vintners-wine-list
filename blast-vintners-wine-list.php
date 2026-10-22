@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blast Vintners Wine List
  * Description: The bespoke wine-list storefront: the Buy column and expandable descriptions on TablePress tables, the add-to-cart endpoint behind them, and the spreadsheet-import-to-WooCommerce-product step. Previously this code lived inside the TablePress plugin's own source files and inside the X theme's functions.php, which meant updating either one destroyed it. It now lives here, on documented hooks only.
- * Version: 1.2.0
+ * Version: 1.2.1
  * Author: Anirudha Talmale
  * Requires PHP: 7.4
  *
@@ -18,7 +18,7 @@ if ( ! class_exists( 'BVWL_Wine_List' ) ) :
 final class BVWL_Wine_List {
 
 	const META_KEY = '_table_press_woo_products';
-	const VERSION  = '1.2.0';
+	const VERSION  = '1.2.1';
 
 	/*
 	 * Since 1.1.0 a product is identified by what the spreadsheet row says it is
@@ -646,10 +646,21 @@ final class BVWL_Wine_List {
 		$select->setAttribute( 'class', 'tbp-woo-qt' );
 		$select->setAttribute( 'id', 'tbp-woo-qt' . $row_idx );
 
-		// Identical to the original, is_int() checks and all: the stored qty/unit
-		// are real integers, so a multiple-of-unit list is produced; anything else
-		// falls back to a single "1".
-		if ( $rp['qty'] && $rp['unit'] && is_int( $rp['unit'] ) && is_int( $rp['qty'] ) ) {
+		// For wines sold by the case (unit > 1) the sheet's quantity column counts
+		// CASES, and the price is per case -- Joe confirmed, 22 Oct 2026: "quantity
+		// = 1 and unit = 12 is 1 case of 12 bottles". The original code treated
+		// the quantity as bottles and offered multiples of the unit (6, 12, 18...)
+		// up to it, which for 151 of 152 case wines produced an EMPTY list, and for
+		// the one that wasn't empty offered "6" -- six cases. Offer 1..N cases.
+		if ( $rp['qty'] && $rp['unit'] && is_int( $rp['unit'] ) && is_int( $rp['qty'] ) && $rp['unit'] > 1 ) {
+			$select->setAttribute( 'class', 'tbp-woo-qt bvwl-case' );
+			for ( $n = 1; $n <= $rp['qty']; $n++ ) {
+				$o = $doc->createElement( 'option', $n . ( 1 === $n ? ' case' : ' cases' ) );
+				$o->setAttribute( 'value', (string) $n );
+				$select->appendChild( $o );
+			}
+		} elseif ( $rp['qty'] && $rp['unit'] && is_int( $rp['unit'] ) && is_int( $rp['qty'] ) ) {
+			// Single bottles: unchanged, 1..N.
 			$slt = $rp['unit'];
 			while ( $slt <= $rp['qty'] ) {
 				$o = $doc->createElement( 'option', (string) $slt );
@@ -776,6 +787,7 @@ final class BVWL_Wine_List {
     </script>
     <style type="text/css">
     .tbp-woo-btn{    background: none repeat scroll 0 0 #EEEEEE !important;border: 1px solid #E4E4E4 !important;border-radius: 3px !important;color: #000000 !important;float: left !important;height: 27px !important;}
+    .tbp-woo-qt.bvwl-case{ max-width: none !important; width: auto !important; }
     .tbp-woo-qt{ float: left !important;height: auto !important;max-width: 42px !important;padding: 3px 2px !important;text-align: center !important;margin-right: 2px !important;}
     .tbp-woo-desc{display: none;padding: 20px 0 !important;}
     .tbpwoodesc{float: right; text-align: right;}
