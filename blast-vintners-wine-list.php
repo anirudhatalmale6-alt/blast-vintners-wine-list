@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Blast Vintners Wine List
  * Description: The bespoke wine-list storefront: the Buy column and expandable descriptions on TablePress tables, the add-to-cart endpoint behind them, and the spreadsheet-import-to-WooCommerce-product step. Previously this code lived inside the TablePress plugin's own source files and inside the X theme's functions.php, which meant updating either one destroyed it. It now lives here, on documented hooks only.
- * Version: 1.2.1
+ * Version: 1.3.0
  * Author: Anirudha Talmale
  * Requires PHP: 7.4
  *
@@ -18,7 +18,7 @@ if ( ! class_exists( 'BVWL_Wine_List' ) ) :
 final class BVWL_Wine_List {
 
 	const META_KEY = '_table_press_woo_products';
-	const VERSION  = '1.2.1';
+	const VERSION  = '1.3.0';
 
 	/*
 	 * Since 1.1.0 a product is identified by what the spreadsheet row says it is
@@ -93,7 +93,11 @@ final class BVWL_Wine_List {
 		// --- single product page: vintage + description, search snippet ----
 		add_action( 'woocommerce_single_product_summary', array( $this, 'product_page_details' ), 25 );
 		add_action( 'wp', array( $this, 'product_layout_setup' ) );
+		add_action( 'template_redirect', array( $this, 'render_region_page' ), 20 );
 		add_filter( 'wpseo_title', array( $this, 'seo_title' ) );
+		add_filter( 'wpseo_title', array( $this, 'region_seo_title' ) );
+		add_filter( 'wpseo_metadesc', array( $this, 'region_seo_description' ) );
+		add_filter( 'wpseo_opengraph_desc', array( $this, 'region_seo_description' ) );
 		add_filter( 'wpseo_metadesc', array( $this, 'seo_description' ) );
 		add_filter( 'wpseo_opengraph_desc', array( $this, 'seo_description' ) );
 		add_action( 'template_redirect', array( $this, 'redirect_merged_duplicate' ) );
@@ -756,22 +760,49 @@ final class BVWL_Wine_List {
        function tbpwooaddToCart(p_id,r_idx) {
 
       var ajaxurl = '<?php echo $ajaxurl; ?>';
+      var $row  = jQuery( "#tbp-woo-qty"+r_idx );
+      var $cell = $row.closest( 'td' );
+      var wine  = jQuery.trim( $row.closest( 'tr' ).find( 'div[onclick*="tbp-woo-desc"]' ).first().text() );
+      var qtyEl = jQuery( "#tbp-woo-qt"+r_idx );
+      var qty   = qtyEl.val();
+      var qtyTx = qtyEl.find( 'option:selected' ).text() || qty;
+
+      <?php if ( 'v2' === get_option( 'bvwl_add_feedback' ) ) : ?>
+      /* v2: confirm in place and in a small toast. The page does not move --
+         the old version put WooCommerce's green notice above the table and
+         scrolled up to it, so you lost your place in a 700-row list. */
+      $row.find( '.tbp-woo-btn' ).prop( 'disabled', true ).val( '…' );
+      jQuery.post(ajaxurl, { action: 'my_custom_add_to_cart', product_id: p_id, qty: qty ? qty : 1 }, function(response) {
+        if ( response && response.success ) {
+          bvwlApplyCart( response );
+          $row.hide().find( '.tbp-woo-btn' ).prop( 'disabled', false ).val( 'add' );
+          $cell.find( '.bvwl-added' ).remove();
+          $cell.append( '<span class="bvwl-added">&#10003; Added</span>' );
+          bvwlToast( 'ok', 'Added to your basket', ( qtyTx ? qtyTx + ' × ' : '' ) + wine );
+        } else {
+          $row.find( '.tbp-woo-btn' ).prop( 'disabled', false ).val( 'add' );
+          var msg = response && response.message ? jQuery( '<div>' ).html( response.message ).text() : 'Something went wrong, please try again.';
+          bvwlToast( 'err', 'Not added', jQuery.trim( msg ) );
+        }
+      }, 'json').fail(function(){
+        $row.find( '.tbp-woo-btn' ).prop( 'disabled', false ).val( 'add' );
+        bvwlToast( 'err', 'Not added', 'Something went wrong, please try again.' );
+      });
+      return;
+      <?php endif; ?>
 
       /* Where to show "added to your cart". This used to be hard-wired to the
          Full List (#tablepress-39-...), so on a producer page the message went
          nowhere. Use the wrapper around the table that was actually clicked. */
-      var $row  = jQuery( "#tbp-woo-qty"+r_idx );
       var $box  = $row.closest( '[id$="-scroll-wrapper"]' );
       if ( ! $box.length ) { $box = $row.closest( '.dataTables_wrapper' ); }
       if ( ! $box.length ) { $box = $row.closest( 'table' ).parent(); }
 
       $row.append( "<p>Processing...</p>" );
       $box.find('.woocommerce-notices-wrapper').remove();
-        var qty = jQuery("#tbp-woo-qt"+r_idx).val();
-        var id = p_id;
         var data = {
           action     : 'my_custom_add_to_cart',
-          product_id : id,
+          product_id : p_id,
           qty: qty ? qty : 1
         };
         jQuery.post(ajaxurl, data, function(response) {
@@ -781,6 +812,22 @@ final class BVWL_Wine_List {
           jQuery('html, body').animate({ scrollTop: $box.offset().top }, 2000);
         }, 'json');
 
+      }
+
+      var bvwlToastTimer = null;
+      function bvwlToast( kind, title, body ) {
+        var $t = jQuery( '#bvwl-toast' );
+        if ( ! $t.length ) {
+          $t = jQuery( '<div id="bvwl-toast" role="status" aria-live="polite"><div class="bvwl-toast-text"><strong></strong><span></span></div><a class="bvwl-toast-cart" href="<?php echo esc_url( function_exists( 'wc_get_cart_url' ) ? wc_get_cart_url() : home_url( '/cart/' ) ); ?>">View basket</a><button type="button" class="bvwl-toast-x" aria-label="Close">&times;</button></div>' ).appendTo( 'body' );
+          $t.on( 'click', '.bvwl-toast-x', function(){ $t.removeClass( 'is-on' ); } );
+        }
+        $t.toggleClass( 'is-err', 'err' === kind );
+        $t.find( 'strong' ).text( title );
+        $t.find( '.bvwl-toast-text span' ).text( body );
+        $t.find( '.bvwl-toast-cart' ).toggle( 'err' !== kind );
+        $t.addClass( 'is-on' );
+        clearTimeout( bvwlToastTimer );
+        bvwlToastTimer = setTimeout( function(){ $t.removeClass( 'is-on' ); }, 6000 );
       }
     function tbpwooshowAllDescription(p_id,r_idx) {
     }
@@ -792,6 +839,17 @@ final class BVWL_Wine_List {
     .tbp-woo-desc{display: none;padding: 20px 0 !important;}
     .tbpwoodesc{float: right; text-align: right;}
     .bvwl-soldout{color:#999;font-size:12px;white-space:nowrap;}
+    .bvwl-added{color:#4a7a3a;font-size:12px;white-space:nowrap;}
+    #bvwl-toast{position:fixed;right:24px;bottom:24px;z-index:99999;display:flex;align-items:center;gap:16px;max-width:420px;padding:16px 18px;background:#111;color:#fff;font-size:14px;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,.25);transform:translateY(20px);opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;}
+    #bvwl-toast.is-on{opacity:1;transform:none;pointer-events:auto;}
+    #bvwl-toast.is-err{background:#7a1f1f;}
+    #bvwl-toast strong{display:block;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:#cfcf8a;margin-bottom:2px;}
+    #bvwl-toast.is-err strong{color:#f3c0c0;}
+    #bvwl-toast .bvwl-toast-text{flex:1;}
+    #bvwl-toast .bvwl-toast-cart{color:#fff;border:1px solid #fff;padding:7px 12px;text-decoration:none;font-size:12px;letter-spacing:.1em;text-transform:uppercase;white-space:nowrap;}
+    #bvwl-toast .bvwl-toast-cart:hover{background:#fff;color:#111;}
+    #bvwl-toast .bvwl-toast-x{background:none;border:0;color:#aaa;font-size:20px;line-height:1;cursor:pointer;padding:0 0 0 4px;}
+    @media (max-width:600px){#bvwl-toast{left:12px;right:12px;bottom:12px;max-width:none;}}
     .bvwl-product-details{margin:0 0 1.5em;}
     .bvwl-product-details .bvwl-facts{margin:0 0 .75em;}
     .tablepress tbody td{cursor: pointer !important;}
@@ -1690,6 +1748,89 @@ final class BVWL_Wine_List {
 		<?php
 	}
 
+
+	/* =====================================================================
+	 * Region pages (/product-category/<region>/), behind `bvwl_region_pages`
+	 *
+	 * The theme's own archive was broken three ways: its landmark heading sat on
+	 * top of the menu, the shop was set to ONE product per page (8 wines = 8
+	 * pages), and its product cards rely on photos this shop doesn't use, so the
+	 * one product per page didn't even show. The product pages link here
+	 * ("Full List / Burgundy Red", "See all Burgundy Red"). Show the Full List
+	 * filtered to the region instead -- the table customers already know, Buy
+	 * buttons and all.
+	 * ===================================================================== */
+
+	const FULL_LIST_TABLE = '39';
+
+	public function render_region_page() {
+		if ( 'on' !== get_option( 'bvwl_region_pages' ) || ! function_exists( 'is_product_category' ) || ! is_product_category() ) {
+			return;
+		}
+		$term = get_queried_object();
+		if ( ! $term instanceof WP_Term ) {
+			return;
+		}
+		$post_id = $this->table_id_to_post_id( self::FULL_LIST_TABLE );
+		$rows    = $post_id ? json_decode( get_post( $post_id )->post_content, true ) : null;
+		$col     = ( is_array( $rows ) && ! empty( $rows[0] ) ) ? self::find_col( $rows[0], array( 'Region', 'Category' ) ) : false;
+		if ( false === $col ) {
+			return; // can't find the region column: leave the theme's page alone
+		}
+		$n = 0;
+		foreach ( $rows as $i => $r ) {
+			if ( $i && isset( $r[ $col ] ) && 0 === strcasecmp( trim( (string) $r[ $col ] ), trim( html_entity_decode( $term->name ) ) ) ) {
+				$n++;
+			}
+		}
+		if ( is_paged() ) { // the old archive paged one wine at a time; those URLs all mean page 1 now
+			wp_safe_redirect( get_term_link( $term ), 301 );
+			exit;
+		}
+		status_header( 200 );
+		add_filter( 'body_class', function ( $c ) { $c[] = 'bvwl-region-page'; return $c; } );
+		// The theme prints its "Category Archive" landmark heading as part of the
+		// header. Hiding it with CSS still leaves a second <h1> for search engines
+		// to read, so take it out of the markup.
+		ob_start();
+		get_header();
+		echo preg_replace( '#<header class="x-header-landmark[^"]*">.*?</header>#s', '', (string) ob_get_clean(), 1 );
+		echo '<div class="x-main x-container-fluid max width offset" role="main"><article class="page type-page hentry bvwl-region"><div class="entry-wrap"><div class="entry-content content">';
+		echo '<nav class="bvwl-pp-crumbs"><a href="' . esc_url( home_url( '/list/' ) ) . '">Full List</a> <span>/</span> ' . esc_html( $term->name ) . '</nav>';
+		echo '<h1 class="bvwl-region-title">' . esc_html( $term->name ) . '</h1>';
+		echo '<p class="bvwl-region-count">' . ( $n ? sprintf( _n( '%d wine on our current list', '%d wines on our current list', $n ), $n ) : 'Nothing from this region on our current list &mdash; have a look at the <a href="' . esc_url( home_url( '/list/' ) ) . '">Full List</a>.' ) . '</p>';
+		if ( '' !== trim( (string) $term->description ) ) {
+			echo '<div class="bvwl-region-desc">' . wpautop( wp_kses_post( $term->description ) ) . '</div>';
+		}
+		if ( $n ) {
+			echo do_shortcode( sprintf( '[table id=%s filter="%s" filter_columns="%d" filter_full_cell_match="true" responsive=scroll /]', self::FULL_LIST_TABLE, esc_attr( html_entity_decode( $term->name ) ), (int) $col + 1 ) );
+		}
+		echo '</div></div></article></div>';
+		echo '<style>.bvwl-region-page .x-header-landmark{display:none}.bvwl-region .bvwl-pp-crumbs{font-size:13px;letter-spacing:.04em;text-transform:uppercase;color:#888;margin:8px 0 18px}.bvwl-region .bvwl-pp-crumbs a{color:#666;text-decoration:none}.bvwl-region .bvwl-pp-crumbs span{margin:0 6px;color:#bbb}.bvwl-region-title{font-size:36px;margin:0 0 6px}.bvwl-region-count{color:#888;margin:0 0 24px}</style>';
+		get_footer();
+		exit;
+	}
+
+	/** "Alsace White Wines - Blast Vintners" rather than "Alsace White Archives". */
+	public function region_seo_title( $title ) {
+		if ( 'on' === get_option( 'bvwl_region_pages' ) && function_exists( 'is_product_category' ) && is_product_category() ) {
+			$t = get_queried_object();
+			if ( $t instanceof WP_Term ) {
+				return html_entity_decode( $t->name ) . ' Wines - ' . get_bloginfo( 'name' );
+			}
+		}
+		return $title;
+	}
+
+	public function region_seo_description( $desc ) {
+		if ( '' === trim( (string) $desc ) && 'on' === get_option( 'bvwl_region_pages' ) && function_exists( 'is_product_category' ) && is_product_category() ) {
+			$t = get_queried_object();
+			if ( $t instanceof WP_Term ) {
+				return 'Our current list of ' . html_entity_decode( $t->name ) . ' wines, with prices and availability. Buy by the bottle or case from Blast Vintners.';
+			}
+		}
+		return $desc;
+	}
 
 	/** "Pinot Noir Schueller 2023 - Blast Vintners": people search with the vintage. */
 	public function seo_title( $title ) {
